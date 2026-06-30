@@ -5,11 +5,15 @@ discovers, runs, and presents *every* test suite in the monorepo as a single
 interactive TUI. It replaces the orchestration logic in
 `tools/scripts/vayu.sh test` — `vayu.sh test` builds `vtest` and launches it.
 
-Status: **ctest adapter is REAL** — `vtest` discovers and runs the two ctest
-suites `vayu.sh test` drives (`sitl` → `build_sitl`, `gcs` → `navigator/build
--R ^tst_`) via real `ctest` calls, and parses the results. The pytest (headless)
-and native-C (firmware host) adapters are the next step; the TUI/result model
-already supports them. Run from the repo root.
+Status: **all runner types wired.** vtest discovers + runs four components:
+- `sitl` (ctest → `build_sitl`), `gcs` (ctest → `navigator/build -R ^tst_`),
+- `fw-host` (ctest → `build_fwtest`; the firmware host unit tests — `fft`,
+  `mixer` — now a real CTest project at `firmware/tests/host/CMakeLists.txt`),
+- `headless` (**pytest** → `navigator/headless-sdk`; 59 unit + integration tests,
+  discovered via `pytest --collect-only`, run via `pytest -v` and parsed).
+
+Adapters live behind a small dispatch (`discover_comp` / `run_suite` / `build_cmd`
+switch on `adapter`). Run from the repo root.
 
 ## What it is (and is NOT)
 
@@ -74,7 +78,16 @@ Target integration: `vayu.sh test` → CMake builds `vtest` (+ links the native
 firmware-host cases) → runs it (TUI when interactive, `--ci` under CI). The
 ctest/qtest/pytest components are invoked by vtest as child processes.
 
+## Lazy build + log pane
+
+vtest does **not** build the test binaries up front — launch is fast. It only
+*configures* the ctest suites (so `ctest -N` discovery works). When you select a
+test and press `r`, vtest builds just that target (`cmake --build <dir> --target
+<tprefix><name>`) — or the whole component for a header / `a` — **streaming the
+build output live into the log pane**, then runs it. `vayu.sh test` configures
+the suites and launches; it no longer compiles everything.
+
 ## Keys
 
-`↑/↓` move · `space` expand/collapse component · `r` run selected ·
-`a` run all · `f` show only failed · `q` quit.
+`↑/↓` move · `space` expand/collapse component · `r` build + run selected ·
+`a` build + run all · `f` show only failed · `q` quit.
