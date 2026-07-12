@@ -328,13 +328,14 @@ static void pytest_discover(comp_t *c) {
 
 /* The pytest run command: run from the rootdir (nodeids stay rootdir-relative,
  * matching discovery). PYTHONUNBUFFERED + stdbuf -oL so the pipe streams per
- * test. Integration tests read VSIM_BIN_PATH / VAYU_SITL_BIN. */
+ * test. Integration tests read VAYU_SITL_RTOS_BIN (the single in-process SITL
+ * binary that replaced the vsim_d + vayu_sitl pair). */
 static void pytest_run_cmd(char *buf, size_t n, comp_t *c, const char *only) {
   snprintf(buf, n,
-           "cd '%s' && PYTHONUNBUFFERED=1 VSIM_BIN_PATH='%s/build_vsim/vsim_d' "
-           "VAYU_SITL_BIN='%s/build_sitl/vayu_sitl' stdbuf -oL -eL %s -m pytest "
-           "'%s' -v 2>&1",
-           c->test_dir, g_cwd, g_cwd, g_python, only ? only : c->filter);
+           "cd '%s' && PYTHONUNBUFFERED=1 "
+           "VAYU_SITL_RTOS_BIN='%s/build_sitl_rtos/vayu_sitl_rtos' "
+           "stdbuf -oL -eL %s -m pytest '%s' -v 2>&1",
+           c->test_dir, g_cwd, g_python, only ? only : c->filter);
 }
 
 /* Parse one line of pytest -v output: "<nodeid> PASSED [..%]". */
@@ -440,11 +441,11 @@ static const char *log_line(int a) {
 }
 
 /* The on-demand build command for a component (only != NULL = single ctest
- * target). ctest builds its CMake target(s); pytest builds the SITL + vsim
- * binaries its integration tests drive. */
+ * target). ctest builds its CMake target(s); pytest builds the single
+ * in-process SITL binary its integration tests drive. */
 static const char *build_cmd(char *buf, size_t n, comp_t *c, const char *only) {
   if (c->adapter == AD_PYTEST)
-    snprintf(buf, n, "cmake --build build_vsim 2>&1 && cmake --build build_sitl 2>&1");
+    snprintf(buf, n, "cmake --build build_sitl_rtos --target vayu_sitl_rtos 2>&1");
   else if (only)
     snprintf(buf, n, "cmake --build '%s' --target '%s%s' 2>&1", c->test_dir,
              c->tprefix, only);
