@@ -30,6 +30,19 @@
 #include <termios.h>
 #include <unistd.h>
 
+/* realloc() into the same pointer leaks the original and then dereferences
+ * NULL. This is a terminal TUI; out of memory is the end of the run either
+ * way, so say so once here instead of at three call sites. */
+static void *xrealloc(void *p, size_t n) {
+  void *q = realloc(p, n);
+  if (!q) {
+    free(p);
+    fputs("vtest: out of memory\n", stderr);
+    exit(1);
+  }
+  return q;
+}
+
 #define VT_W 78
 #define VT_NAME 128
 
@@ -86,6 +99,7 @@ static int run_suite(comp_t *c, const char *only, int interactive);
 /* Run `cmd` (with 2>&1) and return its full stdout as a heap string (caller
  * frees), or NULL on spawn failure. */
 static char *run_capture(const char *cmd) {
+  /* NOLINTNEXTLINE(cert-env33-c): shelling out to ctest/pytest is the job. */
   FILE *fp = popen(cmd, "r");
   if (!fp)
     return NULL;
@@ -172,10 +186,8 @@ static int parse_result_line(const char *line, char *name, size_t namesz,
     *st = ST_PASS;
   else if (strstr(line, "Skipped"))
     *st = ST_SKIP;
-  else if (strstr(line, "Failed"))
-    *st = ST_FAIL;
   else
-    *st = ST_FAIL;
+    *st = ST_FAIL; /* "Failed", and anything unrecognised, is a failure */
 
   *ms = 0.0f;
   const char *s = strstr(line, "sec");
@@ -191,7 +203,7 @@ static int parse_result_line(const char *line, char *name, size_t namesz,
     if (nl && nl < sizeof num) {
       memcpy(num, q, nl);
       num[nl] = 0;
-      *ms = (float)atof(num) * 1000.0f;
+      *ms = (float)strtod(num, NULL) * 1000.0f;
     }
   }
   return 1;
@@ -246,7 +258,7 @@ static void ctest_discover(comp_t *c) {
     if (parse_discovery_line(line, name, sizeof name)) {
       if (n == cap) {
         cap *= 2;
-        arr = realloc(arr, (size_t)cap * sizeof *arr);
+        arr = xrealloc(arr, (size_t)cap * sizeof *arr);
       }
       memset(&arr[n], 0, sizeof arr[n]);
       snprintf(arr[n].name, VT_NAME, "%s", name);
@@ -337,7 +349,7 @@ static void pytest_discover(comp_t *c) {
     if (strstr(l, "::") && l[0] && l[0] != ' ' && l[0] != '=') {
       if (n == cap) {
         cap *= 2;
-        arr = realloc(arr, (size_t)cap * sizeof *arr);
+        arr = xrealloc(arr, (size_t)cap * sizeof *arr);
       }
       memset(&arr[n], 0, sizeof arr[n]);
       snprintf(arr[n].name, VT_NAME, "%s", l);
@@ -373,15 +385,20 @@ static void pytest_run_cmd(char *buf, size_t n, comp_t *c, const char *only) {
 
 /* Parse one line of pytest -v output: "<nodeid> PASSED [..%]". */
 static void pytest_parse_line(comp_t *c, const char *l, int *failed) {
-  const char *p;
-  status_t s;
-  if ((p = strstr(l, " PASSED")))
-    s = ST_PASS;
-  else if ((p = strstr(l, " FAILED")) || (p = strstr(l, " ERROR")))
-    s = ST_FAIL;
-  else if ((p = strstr(l, " SKIPPED")) || (p = strstr(l, " XFAIL")))
-    s = ST_SKIP;
-  else
+  static const struct {
+    const char *tag;
+    status_t st;
+  } kTags[] = {
+      {" PASSED", ST_PASS},  {" FAILED", ST_FAIL}, {" ERROR", ST_FAIL},
+      {" SKIPPED", ST_SKIP}, {" XFAIL", ST_SKIP},
+  };
+  const char *p = NULL;
+  status_t s = ST_FAIL;
+  for (size_t i = 0; i < sizeof kTags / sizeof *kTags && !p; i++) {
+    p = strstr(l, kTags[i].tag);
+    s = kTags[i].st;
+  }
+  if (!p)
     return;
   size_t L = (size_t)(p - l);
   while (L && l[L - 1] == ' ')
@@ -452,7 +469,7 @@ static void sb_putf(sb_t *s, const char *fmt, ...) {
       return;
     }
     s->cap *= 2;
-    s->buf = realloc(s->buf, s->cap); /* grow + retry */
+    s->buf = xrealloc(s->buf, s->cap); /* grow + retry */
   }
 }
 
@@ -585,7 +602,6 @@ static const char *glyph_color(status_t s) {
   case ST_FAIL:
     return CRED;
   case ST_RUNNING:
-    return CYEL;
   case ST_SKIP:
     return CYEL;
   default:
