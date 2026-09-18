@@ -1,17 +1,20 @@
-/* vtest.c — Vayu test orchestrator (interactive TUI) — REAL ctest adapter.
+/* vtest.c — test orchestrator (interactive TUI) — ctest/pytest/script adapters.
  *
- * Repo-root, cross-component orchestrator. This build drives the real ctest
- * suites that `tools/scripts/vayu.sh test` runs:
- *     sitl  ->  ctest --test-dir build_sitl
- *     gcs   ->  ctest --test-dir navigator/build -R ^tst_
- * It discovers cases with `ctest -N`, runs them with `ctest ... --output-on-
- * failure`, and parses the result lines — no XML/JSON, no deps. (pytest +
- * native-C adapters are the next step; only ctest is wired here.)
+ * Repo-root, cross-component orchestrator. A repo declares its suites in the
+ * comps[] table below; each is driven by one of three adapters:
+ *     ctest   discover with `ctest -N`, run with --output-on-failure
+ *     pytest  discover with --collect-only -q, run with -v
+ *     script  standalone executables that print PASS/FAIL and exit non-zero
+ * Result lines are parsed as text — no XML/JSON, no deps.
  *
- * Build:  gcc -std=c11 -Wall -Wextra vtest/vtest.c -o /tmp/vtest
- * Run:    /tmp/vtest          interactive TUI (run from the repo root)
- *         /tmp/vtest --run     non-interactive: discover + run all + report
- *         /tmp/vtest --list    discover + print the catalog, don't run
+ * In this repo both suites are `script`: NavLink's tests are plain python3
+ * files with no framework, because the wire contract three codebases generate
+ * from has to be testable anywhere without a package install.
+ *
+ * Build:  cc -std=c11 -Wall -Wextra vtest/vtest.c -o build/vtest
+ * Run:    scripts/vtest.sh          interactive TUI (run from the repo root)
+ *         scripts/vtest.sh --run    non-interactive: discover + run all + report
+ *         scripts/vtest.sh --list   discover + print the catalog, don't run
  *
  * Zero deps: raw ANSI + termios, no ncurses. Color auto-off when not a TTY.
  */
@@ -55,7 +58,7 @@ typedef struct {
   char *detail; /* captured failure output (heap), or NULL */
 } tcase_t;
 
-typedef enum { AD_CTEST, AD_PYTEST } adapter_t;
+typedef enum { AD_CTEST, AD_PYTEST, AD_SCRIPT } adapter_t;
 
 typedef struct {
   const char *name;     /* component label */
@@ -65,10 +68,11 @@ typedef struct {
   const char
       *filter; /* ctest: -R <regex> (NULL=all);  pytest: subdir ("tests") */
   const char *tprefix; /* ctest: test name -> build target = tprefix + name */
+  const char *build;   /* script: prerequisite command, run before the cases */
   tcase_t *cases;
   int ncases;
   int expanded;
-  char note[160]; /* e.g. "not built — run: vayu.sh build sitl" */
+  char note[160]; /* e.g. "not built — build its CMake target" */
 } comp_t;
 
 /* The catalog: every test suite in the monorepo, by runner.
@@ -76,12 +80,18 @@ typedef struct {
  *            (sim/host: fs_owner -> test_fs_owner; navigator: tst_x -> tst_x).
  *   pytest — test_dir is the rootdir; filter is the subdir to collect/run. */
 static comp_t comps[] = {
-    {"sitl", "ctest", AD_CTEST, "build_sitl", NULL, "test_", NULL, 0, 1, ""},
-    {"gcs", "ctest", AD_CTEST, "navigator/build", "^tst_", "", NULL, 0, 0, ""},
-    {"fw-host", "ctest", AD_CTEST, "build_fwtest", NULL, "test_", NULL, 0, 0,
-     ""},
-    {"headless", "pytest", AD_PYTEST, "navigator/headless-sdk", "tests", "",
-     NULL, 0, 0, ""},
+    /* Every standalone tests/test_*.py, one case each: they print PASS/FAIL and
+     * exit non-zero, so the script adapter needs no per-test knowledge.
+     * They read generated/, so generation is the build step -- without it a
+     * clean tree fails every case for a reason that has nothing to do with the
+     * test. */
+    {"codec", "script", AD_SCRIPT, ".",
+     "ls tests/test_*.py 2>/dev/null | xargs -r -n1 basename", "python3 tests/",
+     "python3 generate.py", NULL, 0, 1, ""},
+    /* The full 7-step pipeline: regenerate, C compile, and the C<->Python
+     * parity checks that no single script covers on its own. */
+    {"pipeline", "script", AD_SCRIPT, ".", "echo run_tests.py", "python3 tests/",
+     NULL, NULL, 0, 0, ""},
 };
 static const int NCOMPS = (int)(sizeof comps / sizeof comps[0]);
 
@@ -269,7 +279,7 @@ static void ctest_discover(comp_t *c) {
   if (n == 0) {
     if (strstr(out, "Failed to change working directory") ||
         strstr(out, "Cannot find") || strstr(out, "No such file"))
-      snprintf(c->note, sizeof c->note, "not built — run: vayu.sh build %s",
+      snprintf(c->note, sizeof c->note, "not built — build the %s target",
                c->name);
     else
       snprintf(c->note, sizeof c->note, "no tests matched");
@@ -360,7 +370,7 @@ static void pytest_discover(comp_t *c) {
   if (n == 0) {
     if (strstr(out, "No module named pytest") || strstr(out, "not found"))
       snprintf(c->note, sizeof c->note,
-               "pytest unavailable (.venv) — run: vayu.sh test headless");
+               "pytest unavailable — install it, or activate the venv");
     else
       snprintf(c->note, sizeof c->note, "no tests collected");
     free(arr);
@@ -416,9 +426,75 @@ static void pytest_parse_line(comp_t *c, const char *l, int *failed) {
   }
 }
 
+/* ----------------------------------------------------------- script adapter */
+/* For suites that are neither ctest nor pytest: a set of standalone executables
+ * that print their own PASS/FAIL and exit non-zero on failure.
+ *
+ *   filter  -- a shell command listing one case name per line
+ *   tprefix -- the command each case name is appended to
+ *
+ * The run wraps each case so it emits "<name> PASSED" / "<name> FAILED", which
+ * is exactly the shape pytest -v produces -- so pytest_parse_line reads it and
+ * there is no second parser to keep in step. */
+static void script_discover(comp_t *c) {
+  char cmd[8192];
+  snprintf(cmd, sizeof cmd, "cd '%s' && %s", c->test_dir, c->filter);
+  char *out = run_capture(cmd);
+  c->note[0] = 0;
+  free(c->cases);
+  c->cases = NULL;
+  c->ncases = 0;
+  if (!out) {
+    snprintf(c->note, sizeof c->note, "discovery command failed");
+    return;
+  }
+  int cap = 16, n = 0;
+  tcase_t *arr = malloc((size_t)cap * sizeof *arr);
+  char *save = NULL;
+  for (char *l = strtok_r(out, "\n", &save); l; l = strtok_r(NULL, "\n", &save)) {
+    if (!l[0] || l[0] == ' ')
+      continue;
+    if (n == cap) {
+      cap *= 2;
+      arr = xrealloc(arr, (size_t)cap * sizeof *arr);
+    }
+    memset(&arr[n], 0, sizeof arr[n]);
+    snprintf(arr[n].name, VT_NAME, "%s", l);
+    arr[n].status = ST_PENDING;
+    n++;
+  }
+  if (n == 0) {
+    snprintf(c->note, sizeof c->note, "no tests found");
+    free(arr);
+  } else {
+    c->cases = arr;
+    c->ncases = n;
+  }
+  free(out);
+}
+
+static void script_run_cmd(char *buf, size_t n, comp_t *c, const char *only) {
+  char list[8192] = {0};
+  size_t used = 0;
+  if (only) {
+    snprintf(list, sizeof list, "'%s'", only);
+  } else {
+    for (int i = 0; i < c->ncases && used < sizeof list - VT_NAME - 4; i++)
+      used += (size_t)snprintf(list + used, sizeof list - used, "'%s' ",
+                               c->cases[i].name);
+  }
+  snprintf(buf, n,
+           "cd '%s' && for t in %s; do "
+           "if %s\"$t\" >/dev/null 2>&1; then echo \"$t PASSED\"; "
+           "else echo \"$t FAILED\"; fi; done",
+           c->test_dir, list, c->tprefix);
+}
+
 /* ----------------------------------------------------------- adapter dispatch */
 static void discover_comp(comp_t *c) {
-  if (c->adapter == AD_PYTEST)
+  if (c->adapter == AD_SCRIPT)
+    script_discover(c);
+  else if (c->adapter == AD_PYTEST)
     pytest_discover(c);
   else
     ctest_discover(c);
@@ -525,7 +601,10 @@ static const char *log_line(int a) {
  * target). ctest builds its CMake target(s); pytest builds the single
  * in-process SITL binary its integration tests drive. */
 static const char *build_cmd(char *buf, size_t n, comp_t *c, const char *only) {
-  if (c->adapter == AD_PYTEST)
+  if (c->adapter == AD_SCRIPT)
+    snprintf(buf, n, "cd '%s' && %s", c->test_dir,
+             c->build ? c->build : "true");
+  else if (c->adapter == AD_PYTEST)
     snprintf(buf, n,
              "cmake --build build_sitl_rtos --target vayu_sitl_rtos 2>&1");
   else if (only)
@@ -694,7 +773,7 @@ static void render(const row_t *rows, int nrows, int sel, int filter_failed,
       }
     }
 
-  printf(" %svtest%s %s— Vayu test orchestrator%s", CBOLD, CRESET, CDIM,
+  printf(" %svtest%s %s— NavLink test orchestrator%s", CBOLD, CRESET, CDIM,
          CRESET);
   printf("   %s%d comps  %d cases   %s✔%d %s✘%d %s○%d %s·%d%s\n", CDIM, NCOMPS,
          tot, CGREEN, pass, CRED, fail, CYEL, skip, CDIM, pend, CRESET);
@@ -921,7 +1000,7 @@ static void draw_frame(sb_t *s, const row_t *rows, int nrows, int sel,
   /* header */
   at_clear(s, 1);
   sb_putf(s,
-          " %svtest%s %s— Vayu test orchestrator%s   %s%d comps %d cases  "
+          " %svtest%s %s— NavLink test orchestrator%s   %s%d comps %d cases  "
           "%s✔%d %s✘%d %s○%d %s·%d%s",
           CBOLD, CRESET, CDIM, CRESET, CDIM, NCOMPS, tot, CGREEN, pass, CRED,
           fail, CYEL, skip, CDIM, pend, CRESET);
@@ -959,7 +1038,10 @@ static void draw_frame(sb_t *s, const row_t *rows, int nrows, int sel,
                CCYAN, c->name, CRESET, CDIM, c->kind, CRESET, ran, c->ncases, p,
                glyph_color(cs), status_label(cs), CRESET);
       if (detail_n > 1) {
-        if (c->adapter == AD_PYTEST)
+        if (c->adapter == AD_SCRIPT)
+          snprintf(dl[1], sizeof dl[1], " %srun%s %s<case>", CDIM, CRESET,
+                   c->tprefix);
+        else if (c->adapter == AD_PYTEST)
           snprintf(dl[1], sizeof dl[1], " %srun%s pytest %s/%s", CDIM, CRESET,
                    c->test_dir, c->filter);
         else
@@ -1147,7 +1229,7 @@ typedef struct {
 /* a streamed line during a run: parse into the model, then log/repaint or echo. */
 static void on_run_line(void *v, const char *line) {
   run_ctx_t *x = v;
-  if (x->c->adapter == AD_PYTEST)
+  if (x->c->adapter == AD_PYTEST || x->c->adapter == AD_SCRIPT)
     pytest_parse_line(x->c, line, &x->failed);
   else
     ctest_parse_line(x->c, line, &x->failed, &x->cur);
@@ -1171,7 +1253,9 @@ static int build_suite(comp_t *c, const char *only, int interactive) {
  * (or -2 if aborted). */
 static int run_suite(comp_t *c, const char *only, int interactive) {
   char cmd[16384];
-  if (c->adapter == AD_PYTEST)
+  if (c->adapter == AD_SCRIPT)
+    script_run_cmd(cmd, sizeof cmd, c, only);
+  else if (c->adapter == AD_PYTEST)
     pytest_run_cmd(cmd, sizeof cmd, c, only);
   else
     ctest_run_cmd(cmd, sizeof cmd, c, only);
