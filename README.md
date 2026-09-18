@@ -24,16 +24,15 @@ block per suite:
 
 ```ini
 [sitl]
-adapter = ctest          # ctest | pytest | script
-dir     = build_sitl     # ctest: cmake binary dir; pytest: rootdir; script: cwd
-filter  = ^tst_          # ctest: -R regex; pytest: subdir; script: lists case names
-prefix  = test_          # ctest: name -> target; script: command each name follows
-build   = make gen       # script only: prerequisite run before the cases
+adapter = ctest          # ctest | pytest
+dir     = build_sitl     # ctest: cmake binary dir; pytest: rootdir
+filter  = ^tst_          # ctest: -R regex; pytest: subdir
+prefix  = test_          # ctest: test name -> build target
 open    = 1              # start the group expanded in the TUI
 ```
 
-Unset keys are empty, which every adapter already reads as "no filter", "no
-prefix", "nothing to build". Lines starting with `#` are comments.
+Unset keys are empty, which both adapters already read as "no filter" and "no
+prefix". Lines starting with `#` are comments.
 
 ## Adapters
 
@@ -41,16 +40,15 @@ prefix", "nothing to build". Lines starting with `#` are comments.
   maps a test name to its CMake target so a single case builds alone.
 - **pytest** — discover with `--collect-only -q`, run with `-v`, from the rootdir
   so nodeids match between the two.
-- **script** — standalone executables that print PASS/FAIL and exit non-zero.
-  `filter` is a shell command listing one case name per line, `prefix` is what
-  each name is appended to. The run wraps each case to emit `<name> PASSED` /
-  `<name> FAILED`, which is the shape `pytest -v` produces — so it reuses that
-  parser rather than adding a second one to keep in step.
-
 Result lines are parsed as text. No XML, no JSON, no reporting plugins.
 
 ## Consumers
 
-Pinned as a submodule by the Vayu flight stack (ctest + pytest suites across
-firmware, GCS and SITL) and by NavLink (script suites). Changes here affect both
-— check `vtest.conf` in each before altering an adapter's contract.
+Pinned as a submodule by the Vayu flight stack (ctest across firmware, GCS and
+SITL; pytest for the headless SDK) and by NavLink (ctest). Changes here affect
+both — check `vtest.conf` in each before altering an adapter's contract.
+
+A suite in some other framework registers with ctest rather than getting its own
+adapter here: `add_test` runs any command, which is how NavLink's Python tests
+and the in-house C frameworks in NavHAL and vaios are all driven through one
+adapter.
