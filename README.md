@@ -52,3 +52,8 @@ A suite in some other framework registers with ctest rather than getting its own
 adapter here: `add_test` runs any command, which is how NavLink's Python tests
 and the in-house C frameworks in NavHAL and vaios are all driven through one
 adapter.
+
+## License
+
+Apache License 2.0 — see [LICENSE.md](LICENSE.md). Copyright (C) 2026 NAVRobotec
+Pvt Ltd.
