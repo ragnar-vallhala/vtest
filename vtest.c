@@ -79,25 +79,106 @@ typedef struct {
  *   ctest  — tprefix maps a test name to its CMake target so it builds alone
  *            (sim/host: fs_owner -> test_fs_owner; navigator: tst_x -> tst_x).
  *   pytest — test_dir is the rootdir; filter is the subdir to collect/run. */
-static comp_t comps[] = {
-    /* Every standalone tests/test_*.py, one case each: they print PASS/FAIL and
-     * exit non-zero, so the script adapter needs no per-test knowledge.
-     * They read generated/, so generation is the build step -- without it a
-     * clean tree fails every case for a reason that has nothing to do with the
-     * test. */
-    {"codec", "script", AD_SCRIPT, ".",
-     "ls tests/test_*.py 2>/dev/null | xargs -r -n1 basename", "python3 tests/",
-     "python3 generate.py", NULL, 0, 1, ""},
-    /* The full 7-step pipeline: regenerate, C compile, and the C<->Python
-     * parity checks that no single script covers on its own. */
-    {"pipeline", "script", AD_SCRIPT, ".", "echo run_tests.py", "python3 tests/",
-     NULL, NULL, 0, 0, ""},
-};
-static const int NCOMPS = (int)(sizeof comps / sizeof comps[0]);
+/* The catalog is not compiled in: vtest is pinned as a submodule by more than
+ * one repo, and each declares its own suites in a vtest.conf at its root. See
+ * load_config() for the format and README.md for a worked example. */
+static comp_t *comps = NULL;
+static int NCOMPS = 0;
 
 static char g_cwd[4096] = "."; /* repo root, absolute */
+static char g_repo[256] = "repo"; /* basename of the repo root, for the title */
 static char g_python[4128] =
     "python3"; /* pytest interpreter (.venv if present) */
+
+/* ------------------------------------------------------------ config file */
+/* vtest.conf, at the root of the repo being tested. One block per suite:
+ *
+ *     # a comment
+ *     [sitl]
+ *     adapter = ctest          ctest | pytest | script
+ *     dir     = build_sitl     ctest: cmake binary dir; pytest: rootdir; script: cwd
+ *     filter  = ^tst_          ctest: -R regex; pytest: subdir; script: lists case names
+ *     prefix  = test_          ctest: name -> target; script: command each name follows
+ *     build   = make gen       script only: prerequisite run before the cases
+ *     open    = 1              start the group expanded in the TUI
+ *
+ * Unset keys are empty/NULL, which each adapter already treats as "no filter",
+ * "no prefix", "nothing to build". */
+static char *cfg_dup(const char *v) { return *v ? strdup(v) : NULL; }
+
+static int load_config(const char *path) {
+  FILE *fp = fopen(path, "r");
+  if (!fp)
+    return -1;
+  int cap = 8;
+  comps = calloc((size_t)cap, sizeof *comps);
+  char line[4096];
+  comp_t *cur = NULL;
+  while (fgets(line, sizeof line, fp)) {
+    char *p = line;
+    while (*p == ' ' || *p == '\t')
+      p++;
+    size_t L = strlen(p);
+    while (L && (p[L - 1] == '\n' || p[L - 1] == '\r' || p[L - 1] == ' '))
+      p[--L] = 0;
+    if (!*p || *p == '#')
+      continue;
+    if (*p == '[') { /* a new suite */
+      char *e = strchr(p, ']');
+      if (!e)
+        continue;
+      *e = 0;
+      if (NCOMPS == cap) {
+        cap *= 2;
+        comps = xrealloc(comps, (size_t)cap * sizeof *comps);
+        memset(comps + NCOMPS, 0, (size_t)(cap - NCOMPS) * sizeof *comps);
+      }
+      cur = &comps[NCOMPS++];
+      memset(cur, 0, sizeof *cur);
+      cur->name = strdup(p + 1);
+      cur->kind = "ctest";
+      cur->test_dir = ".";
+      continue;
+    }
+    char *eq = strchr(p, '=');
+    if (!eq || !cur)
+      continue;
+    *eq = 0;
+    char *k = p, *v = eq + 1;
+    for (size_t i = strlen(k); i && (k[i - 1] == ' ' || k[i - 1] == '\t');)
+      k[--i] = 0;
+    while (*v == ' ' || *v == '\t')
+      v++;
+    if (!strcmp(k, "adapter")) {
+      if (!strcmp(v, "pytest")) {
+        cur->adapter = AD_PYTEST;
+        cur->kind = "pytest";
+      } else if (!strcmp(v, "script")) {
+        cur->adapter = AD_SCRIPT;
+        cur->kind = "script";
+      } else {
+        cur->adapter = AD_CTEST;
+        cur->kind = "ctest";
+      }
+    } else if (!strcmp(k, "dir")) {
+      cur->test_dir = strdup(v);
+    } else if (!strcmp(k, "filter")) {
+      cur->filter = cfg_dup(v);
+    } else if (!strcmp(k, "prefix")) {
+      cur->tprefix = cfg_dup(v);
+    } else if (!strcmp(k, "build")) {
+      cur->build = cfg_dup(v);
+    } else if (!strcmp(k, "open")) {
+      cur->expanded = atoi(v);
+    }
+  }
+  fclose(fp);
+  /* ctest treats a NULL prefix as "", every adapter tolerates a NULL filter. */
+  for (int i = 0; i < NCOMPS; i++)
+    if (!comps[i].tprefix)
+      comps[i].tprefix = "";
+  return NCOMPS;
+}
 
 /* defined later (they need the TUI repaint); declared here for the batch path. */
 static void repaint(void);
@@ -773,7 +854,7 @@ static void render(const row_t *rows, int nrows, int sel, int filter_failed,
       }
     }
 
-  printf(" %svtest%s %s— NavLink test orchestrator%s", CBOLD, CRESET, CDIM,
+  printf(" %svtest%s %s— %s test orchestrator%s", CBOLD, CRESET, CDIM, g_repo,
          CRESET);
   printf("   %s%d comps  %d cases   %s✔%d %s✘%d %s○%d %s·%d%s\n", CDIM, NCOMPS,
          tot, CGREEN, pass, CRED, fail, CYEL, skip, CDIM, pend, CRESET);
@@ -1000,9 +1081,10 @@ static void draw_frame(sb_t *s, const row_t *rows, int nrows, int sel,
   /* header */
   at_clear(s, 1);
   sb_putf(s,
-          " %svtest%s %s— NavLink test orchestrator%s   %s%d comps %d cases  "
+          " %svtest%s %s— %s test orchestrator%s   %s%d comps %d cases  "
           "%s✔%d %s✘%d %s○%d %s·%d%s",
-          CBOLD, CRESET, CDIM, CRESET, CDIM, NCOMPS, tot, CGREEN, pass, CRED,
+          CBOLD, CRESET, CDIM, g_repo, CRESET, CDIM, NCOMPS, tot, CGREEN, pass,
+          CRED,
           fail, CYEL, skip, CDIM, pend, CRESET);
   emit_rule(s, 2);
 
@@ -1383,18 +1465,43 @@ static int run_report(int do_run) {
 
 int main(int argc, char **argv) {
   int do_run = 0, list_only = 0;
+  const char *cfg = getenv("VTEST_CONF");
   for (int i = 1; i < argc; i++) {
     if (strcmp(argv[i], "--run") == 0)
       do_run = 1;
     else if (strcmp(argv[i], "--list") == 0)
       list_only = 1;
+    else if (strcmp(argv[i], "--conf") == 0 && i + 1 < argc)
+      cfg = argv[++i];
   }
+  if (!cfg)
+    cfg = "vtest.conf";
 
   /* repo root (for absolute SITL/vsim binary paths) + pytest interpreter. */
   if (!getcwd(g_cwd, sizeof g_cwd))
     snprintf(g_cwd, sizeof g_cwd, ".");
+  const char *base = strrchr(g_cwd, '/');
+  base = (base && base[1]) ? base + 1 : g_cwd;
+  size_t bl = strlen(base);
+  if (bl >= sizeof g_repo)
+    bl = sizeof g_repo - 1;
+  memcpy(g_repo, base, bl);
+  g_repo[bl] = 0;
   if (access(".venv/bin/python", X_OK) == 0)
     snprintf(g_python, sizeof g_python, "%s/.venv/bin/python", g_cwd);
+
+  if (load_config(cfg) < 0) {
+    fprintf(stderr,
+            "vtest: no %s here.\n"
+            "  Run from the root of a repo that declares its suites, or pass\n"
+            "  --conf <path>. See the vtest README for the format.\n",
+            cfg);
+    return 2;
+  }
+  if (NCOMPS == 0) {
+    fprintf(stderr, "vtest: %s declares no suites.\n", cfg);
+    return 2;
+  }
 
   discover_all();
 
