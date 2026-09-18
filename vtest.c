@@ -15,12 +15,13 @@
  * limitations under the License.
  */
 
-/* vtest.c — test orchestrator (interactive TUI) — ctest + pytest adapters.
+/* vtest.c — test orchestrator (interactive TUI) — ctest, pytest and checks.
  *
  * Repo-root, cross-component orchestrator. A repo declares its suites in a
  * vtest.conf at its root; each is driven by one of two adapters:
  *     ctest   discover with `ctest -N`, run with --output-on-failure
  *     pytest  discover with --collect-only -q, run with -v
+ *     check   one command, one verdict: a linter, a gate, a line count
  * Result lines are parsed as text — no XML/JSON, no deps.
  *
  * Build:  cc -std=c11 -Wall -Wextra vtest.c -o build/vtest
@@ -70,7 +71,7 @@ typedef struct {
   char *detail; /* captured failure output (heap), or NULL */
 } tcase_t;
 
-typedef enum { AD_CTEST, AD_PYTEST } adapter_t;
+typedef enum { AD_CTEST, AD_PYTEST, AD_CHECK } adapter_t;
 
 typedef struct {
   const char *name;     /* component label */
@@ -79,7 +80,9 @@ typedef struct {
   const char *test_dir; /* ctest: cmake binary dir;  pytest: pytest rootdir */
   const char
       *filter; /* ctest: -R <regex> (NULL=all);  pytest: subdir ("tests") */
-  const char *tprefix; /* ctest: test name -> build target = tprefix + name */
+  const char *tprefix;   /* ctest: test name -> build target = tprefix + name */
+  const char *cmd;       /* check: the command whose exit status is the result */
+  const char *configure; /* optional: run before the build, e.g. cmake -S -B */
   tcase_t *cases;
   int ncases;
   int expanded;
@@ -106,10 +109,12 @@ static char g_python[4128] =
  *
  *     # a comment
  *     [sitl]
- *     adapter = ctest          ctest | pytest
+ *     adapter = ctest          ctest | pytest | check
  *     dir     = build_sitl     ctest: cmake binary dir; pytest: rootdir
  *     filter  = ^tst_          ctest: -R regex; pytest: subdir
  *     prefix  = test_          ctest: test name -> build target
+ *     cmd     = make lint      check: the command whose exit status is the verdict
+ *     configure = cmake -S . -B build_san -DSAN=ON    run before the build
  *     open    = 1              start the group expanded in the TUI
  *
  * Unset keys are empty/NULL, which both adapters already treat as "no filter"
@@ -163,6 +168,9 @@ static int load_config(const char *path) {
       if (!strcmp(v, "pytest")) {
         cur->adapter = AD_PYTEST;
         cur->kind = "pytest";
+      } else if (!strcmp(v, "check")) {
+        cur->adapter = AD_CHECK;
+        cur->kind = "check";
       } else {
         cur->adapter = AD_CTEST;
         cur->kind = "ctest";
@@ -173,6 +181,10 @@ static int load_config(const char *path) {
       cur->filter = cfg_dup(v);
     } else if (!strcmp(k, "prefix")) {
       cur->tprefix = cfg_dup(v);
+    } else if (!strcmp(k, "cmd")) {
+      cur->cmd = cfg_dup(v);
+    } else if (!strcmp(k, "configure")) {
+      cur->configure = cfg_dup(v);
     } else if (!strcmp(k, "open")) {
       cur->expanded = atoi(v);
     }
@@ -385,7 +397,15 @@ static void ctest_run_cmd(char *buf, size_t n, comp_t *c, const char *only) {
     snprintf(rflag, sizeof rflag, " -R '^%s$'", only);
   else if (c->filter)
     snprintf(rflag, sizeof rflag, " -R '%s'", c->filter);
+  /* stdbuf gives per-line streaming into the log pane, but it works by
+   * LD_PRELOADing libstdbuf.so -- which lands ahead of the ASan runtime and
+   * trips its link-order check, failing every case in a sanitizer build for a
+   * reason that has nothing to do with the test. The executables here are
+   * themselves ASan-linked, so the ordering it is verifying does not matter;
+   * the check is for uninstrumented programs dlopening instrumented libraries.
+   * Appended, so an ASAN_OPTIONS already in the environment still wins. */
   snprintf(buf, n,
+           "ASAN_OPTIONS=\"verify_asan_link_order=0:${ASAN_OPTIONS:-}\" "
            "stdbuf -oL -eL ctest --test-dir '%s'%s --output-on-failure 2>&1",
            c->test_dir, rflag);
 }
@@ -512,12 +532,60 @@ static void pytest_parse_line(comp_t *c, const char *l, int *failed) {
   }
 }
 
+/* ------------------------------------------------------------ check adapter */
+/* A whole-repo gate that is one command and one verdict: a linter, a formatter,
+ * a coverage ratchet, a line count. Not every check belongs to a CMake project
+ * -- clang-format over a repo with four of them belongs to none -- so these are
+ * declared in vtest.conf rather than registered with ctest.
+ *
+ * Modelled as a suite with exactly one case, so the tree, the run loop, the
+ * abort path and the batch report all work on it unchanged. The run appends the
+ * PASS/FAIL line that pytest_parse_line already reads; the command's own output
+ * goes to the log pane like any other. */
+static void check_discover(comp_t *c) {
+  c->note[0] = 0;
+  free(c->cases);
+  c->cases = calloc(1, sizeof *c->cases);
+  c->ncases = 1;
+  snprintf(c->cases[0].name, VT_NAME, "%s", c->name);
+  c->cases[0].status = ST_PENDING;
+  if (!c->cmd)
+    snprintf(c->note, sizeof c->note, "no cmd = in vtest.conf");
+}
+
+static void check_run_cmd(char *buf, size_t n, comp_t *c, const char *only) {
+  (void)only; /* one case: running "just that case" is running the check */
+  snprintf(buf, n,
+           "cd '%s' && if %s 2>&1; then echo '%s PASSED'; "
+           "else echo '%s FAILED'; fi",
+           c->test_dir, c->cmd ? c->cmd : "false", c->name, c->name);
+}
+
 /* ----------------------------------------------------------- adapter dispatch */
 static void discover_comp(comp_t *c) {
+  if (c->adapter == AD_CHECK) {
+    check_discover(c);
+    return;
+  }
   if (c->adapter == AD_PYTEST)
     pytest_discover(c);
   else
     ctest_discover(c);
+
+  /* A build dir that has never been configured lists no tests, which would
+   * otherwise read as "this suite is empty" and quietly pass. If the suite
+   * knows how to create itself, do that and look again -- this is what lets an
+   * ASan or coverage suite be declared without configuring it by hand first. */
+  if (c->ncases == 0 && c->configure) {
+    char cmd[1024];
+    snprintf(cmd, sizeof cmd, "%s >/dev/null 2>&1", c->configure);
+    if (system(cmd) == 0) {
+      if (c->adapter == AD_PYTEST)
+        pytest_discover(c);
+      else
+        ctest_discover(c);
+    }
+  }
 }
 
 /* ============================================================== terminal/ui */
@@ -621,14 +689,24 @@ static const char *log_line(int a) {
  * target). ctest builds its CMake target(s); pytest builds the single
  * in-process SITL binary its integration tests drive. */
 static const char *build_cmd(char *buf, size_t n, comp_t *c, const char *only) {
-  if (c->adapter == AD_PYTEST)
-    snprintf(buf, n,
-             "cmake --build build_sitl_rtos --target vayu_sitl_rtos 2>&1");
+  /* `configure` creates the build dir when it is missing -- which is what makes
+   * an ASan or coverage suite declarable: same cases, different -D flags, a
+   * build dir nobody has configured yet. cmake is idempotent, so re-running it
+   * on an existing dir is a no-op rather than a rebuild. */
+  char pre[512] = "";
+  if (c->configure)
+    snprintf(pre, sizeof pre, "%s 2>&1 && ", c->configure);
+
+  if (c->adapter == AD_CHECK)
+    snprintf(buf, n, "%strue", pre); /* nothing to compile; configure may exist */
+  else if (c->adapter == AD_PYTEST)
+    snprintf(buf, n, "%scmake --build build_sitl_rtos --target vayu_sitl_rtos 2>&1",
+             pre);
   else if (only)
-    snprintf(buf, n, "cmake --build '%s' --target '%s%s' 2>&1", c->test_dir,
-             c->tprefix, only);
+    snprintf(buf, n, "%scmake --build '%s' --target '%s%s' 2>&1", pre,
+             c->test_dir, c->tprefix, only);
   else
-    snprintf(buf, n, "cmake --build '%s' 2>&1", c->test_dir);
+    snprintf(buf, n, "%scmake --build '%s' 2>&1", pre, c->test_dir);
   return buf;
 }
 
@@ -870,8 +948,15 @@ static void render(const row_t *rows, int nrows, int sel, int filter_failed,
 static int run_all_batch(void) {
   int failed = 0;
   for (int i = 0; i < NCOMPS; i++) {
-    if (comps[i].ncases == 0)
+    if (comps[i].ncases == 0) {
+      /* Nothing discovered is not nothing wrong: it means the suite never ran.
+       * Counting it as a failure is what stops an unconfigured or broken build
+       * dir from reporting ALL PASSED. */
+      printf("==> %s: no cases discovered — %s\n", comps[i].name,
+             comps[i].note[0] ? comps[i].note : "suite did not run");
+      failed++;
       continue;
+    }
     printf("==> building %s\n", comps[i].name);
     fflush(stdout);
     build_suite(&comps[i], NULL, 0);
@@ -1056,7 +1141,10 @@ static void draw_frame(sb_t *s, const row_t *rows, int nrows, int sel,
                CCYAN, c->name, CRESET, CDIM, c->kind, CRESET, ran, c->ncases, p,
                glyph_color(cs), status_label(cs), CRESET);
       if (detail_n > 1) {
-        if (c->adapter == AD_PYTEST)
+        if (c->adapter == AD_CHECK)
+          snprintf(dl[1], sizeof dl[1], " %srun%s %s", CDIM, CRESET,
+                   c->cmd ? c->cmd : "(no cmd)");
+        else if (c->adapter == AD_PYTEST)
           snprintf(dl[1], sizeof dl[1], " %srun%s pytest %s/%s", CDIM, CRESET,
                    c->test_dir, c->filter);
         else
@@ -1244,7 +1332,7 @@ typedef struct {
 /* a streamed line during a run: parse into the model, then log/repaint or echo. */
 static void on_run_line(void *v, const char *line) {
   run_ctx_t *x = v;
-  if (x->c->adapter == AD_PYTEST)
+  if (x->c->adapter == AD_PYTEST || x->c->adapter == AD_CHECK)
     pytest_parse_line(x->c, line, &x->failed);
   else
     ctest_parse_line(x->c, line, &x->failed, &x->cur);
@@ -1268,7 +1356,9 @@ static int build_suite(comp_t *c, const char *only, int interactive) {
  * (or -2 if aborted). */
 static int run_suite(comp_t *c, const char *only, int interactive) {
   char cmd[16384];
-  if (c->adapter == AD_PYTEST)
+  if (c->adapter == AD_CHECK)
+    check_run_cmd(cmd, sizeof cmd, c, only);
+  else if (c->adapter == AD_PYTEST)
     pytest_run_cmd(cmd, sizeof cmd, c, only);
   else
     ctest_run_cmd(cmd, sizeof cmd, c, only);
