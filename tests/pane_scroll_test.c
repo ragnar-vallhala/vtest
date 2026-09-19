@@ -16,8 +16,8 @@
  */
 
 /**
- * @file log_scroll_test.c
- * @brief The log ring's windowing and scroll clamp.
+ * @file pane_scroll_test.c
+ * @brief Windowing and scroll clamps for the log and detail panes.
  *
  * vtest is one file of statics, so the unit under test is reached by including
  * it with main() renamed away. That keeps the production file free of test
@@ -92,6 +92,27 @@ int main(void) {
   g_log_off = 0;
   log_scroll(5, VIS);
   CHECK(g_log_off == 0, "no scroll when the log is shorter than the pane");
+
+  /* --- the detail pane scrolls on the same contract ------------------------ */
+  g_dl_n = 20;
+  g_detail_off = 0;
+  detail_scroll(4, VIS);
+  CHECK(g_detail_off == 4, "detail scrolls forward");
+  detail_scroll(-100, VIS);
+  CHECK(g_detail_off == 0, "detail clamps at the top");
+  detail_scroll(10000, VIS);
+  CHECK(g_detail_off == 20 - VIS, "detail clamps at the bottom");
+
+  /* Re-clamping after the content shrinks is what stops a stale offset from
+   * showing an empty pane when the selection moves to a shorter entry. */
+  g_dl_n = 2;
+  detail_scroll(0, VIS);
+  CHECK(g_detail_off == 0, "a shorter entry re-clamps the offset");
+
+  g_dl_n = 0;
+  g_detail_off = 0;
+  detail_scroll(3, VIS);
+  CHECK(g_detail_off == 0, "nothing to scroll when the pane is empty");
 
   printf("  %d checks, 0 failures\n", checks);
   return 0;

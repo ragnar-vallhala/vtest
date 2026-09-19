@@ -654,6 +654,11 @@ static void query_winsize(void) {
 
 /* ---- UI state shared with the streaming-build repaint path ---------------- */
 static int g_sel = 0, g_top = 0, g_filter = 0;
+/* Which pane the arrow keys act on. Left/right move between them; up/down then
+ * scroll whichever holds focus, so one pair of keys drives all three. */
+typedef enum { PANE_LIST, PANE_DETAIL, PANE_LOG, PANE_COUNT } pane_t;
+static pane_t g_pane = PANE_LIST;
+static int g_detail_off = 0;
 static const char *g_status =
     NULL;            /* transient footer status (building/running) */
 static sb_t g_frame; /* reused frame buffer */
@@ -1011,6 +1016,10 @@ static int read_key(void) {
         return 'k'; /* up */
       if (seq[1] == 'B')
         return 'j'; /* down */
+      if (seq[1] == 'C')
+        return 'l'; /* right */
+      if (seq[1] == 'D')
+        return 'h'; /* left */
       /* PgUp/PgDn are "ESC [ 5 ~" / "ESC [ 6 ~" — one byte longer than the
        * arrows, so the trailing tilde has to be consumed or it is read as a
        * keystroke of its own. */
@@ -1065,14 +1074,37 @@ static void emit_tree_row(sb_t *s, int screen, const row_t *r, int is_sel) {
   }
 }
 
-/* a dim rule with a left-aligned label, e.g. "── log ───────────". */
-static void emit_labeled_rule(sb_t *s, int row, const char *label) {
+/* A labeled rule that brightens when its pane has focus, so left/right has
+ * something visible to move. */
+static void emit_pane_rule(sb_t *s, int row, const char *label, int focused) {
   at_clear(s, row);
-  sb_putf(s, "%s── %s ", CDIM, label);
+  const char *c = focused ? CCYAN : CDIM;
+  sb_putf(s, "%s── %s%s%s ", c, focused ? CBOLD : "", label, CRESET);
+  sb_putf(s, "%s", c);
   int used = 4 + (int)strlen(label);
   for (int i = used; i < g_cols; i++)
     sb_putf(s, "─");
   sb_putf(s, "%s", CRESET);
+}
+
+/* The detail pane's full contents, rebuilt on every frame. Held whole rather
+ * than clipped at the pane height so it can be scrolled: a failure's captured
+ * output is usually longer than the three lines the pane starts at. */
+#define DETAIL_CAP 256
+static char g_dl[DETAIL_CAP][512];
+static int g_dl_n = 0;
+
+/* Same contract as log_scroll, against the detail buffer: delta lines, clamped
+ * so the pane can never be scrolled past either end of what it holds. */
+static void detail_scroll(int delta, int visible) {
+  int max = g_dl_n - visible;
+  if (max < 0)
+    max = 0;
+  g_detail_off += delta;
+  if (g_detail_off > max)
+    g_detail_off = max;
+  if (g_detail_off < 0)
+    g_detail_off = 0;
 }
 
 /* Pane heights: detail and log shrink first on short terminals so the list
@@ -1135,7 +1167,7 @@ static void draw_frame(sb_t *s, const row_t *rows, int nrows, int sel,
           CBOLD, CRESET, CDIM, g_repo, CRESET, CDIM, NCOMPS, tot, CGREEN, pass,
           CRED,
           fail, CYEL, skip, CDIM, pend, CRESET);
-  emit_rule(s, 2);
+  emit_pane_rule(s, 2, "tests", g_pane == PANE_LIST);
 
   /* list viewport (rows 3 .. 2+list_h) with scroll markers */
   for (int i = 0; i < list_h; i++) {
@@ -1153,62 +1185,75 @@ static void draw_frame(sb_t *s, const row_t *rows, int nrows, int sel,
 
   /* detail pane: labeled rule + detail_n content lines */
   int dr = 3 + list_h;
-  emit_labeled_rule(s, dr, "detail");
-  char dl[6][512];
-  for (int i = 0; i < detail_n; i++)
-    dl[i][0] = 0;
+
+  g_dl_n = 0;
   if (sel >= 0 && sel < nrows) {
     int ci = rows[sel].c, k = rows[sel].cidx;
     if (k == -1) {
       comp_t *c = &comps[ci];
       int p, ran;
       status_t cs = comp_status(c, &p, &ran);
-      snprintf(dl[0], sizeof dl[0],
-               " %s%s%s %s%s%s — %d/%d ran, %d passed  "
-               "%s%s%s",
-               CCYAN, c->name, CRESET, CDIM, c->kind, CRESET, ran, c->ncases, p,
+      snprintf(g_dl[g_dl_n++], sizeof g_dl[0],
+               " %s%s%s %s%s%s — %d/%d ran, %d passed  %s%s%s", CCYAN, c->name,
+               CRESET, CDIM, c->kind, CRESET, ran, c->ncases, p,
                glyph_color(cs), status_label(cs), CRESET);
-      if (detail_n > 1) {
-        if (c->adapter == AD_CHECK)
-          snprintf(dl[1], sizeof dl[1], " %srun%s %s", CDIM, CRESET,
-                   c->cmd ? c->cmd : "(no cmd)");
-        else if (c->adapter == AD_PYTEST)
-          snprintf(dl[1], sizeof dl[1], " %srun%s pytest %s/%s", CDIM, CRESET,
-                   c->test_dir, c->filter);
-        else
-          snprintf(dl[1], sizeof dl[1], " %srun%s ctest --test-dir %s%s%s",
-                   CDIM, CRESET, c->test_dir, c->filter ? " -R " : "",
-                   c->filter ? c->filter : "");
-      }
+      if (c->adapter == AD_CHECK)
+        snprintf(g_dl[g_dl_n++], sizeof g_dl[0], " %srun%s %s", CDIM, CRESET,
+                 c->cmd ? c->cmd : "(no cmd)");
+      else if (c->adapter == AD_PYTEST)
+        snprintf(g_dl[g_dl_n++], sizeof g_dl[0], " %srun%s pytest %s/%s", CDIM,
+                 CRESET, c->test_dir, c->filter);
+      else
+        snprintf(g_dl[g_dl_n++], sizeof g_dl[0],
+                 " %srun%s ctest --test-dir %s%s%s", CDIM, CRESET, c->test_dir,
+                 c->filter ? " -R " : "", c->filter ? c->filter : "");
+      if (c->note[0])
+        snprintf(g_dl[g_dl_n++], sizeof g_dl[0], " %s%s%s", CYEL, c->note,
+                 CRESET);
     } else {
       tcase_t *tc = &comps[ci].cases[k];
-      snprintf(dl[0], sizeof dl[0], " %s::%s   %s%s%s  %s%.2f ms%s",
+      snprintf(g_dl[g_dl_n++], sizeof g_dl[0], " %s::%s   %s%s%s  %s%.2f ms%s",
                comps[ci].name, tc->name, glyph_color(tc->status),
                status_label(tc->status), CRESET, CDIM, (double)tc->time_ms,
                CRESET);
-      if (tc->status == ST_FAIL && tc->detail) {
-        int li = 1;
+      if (tc->detail) {
         char *copy = strdup(tc->detail), *save = NULL;
-        for (char *l = strtok_r(copy, "\n", &save); l && li < detail_n;
-             l = strtok_r(NULL, "\n", &save), li++)
-          snprintf(dl[li], sizeof dl[li], " %s│%s %s", CRED, CRESET, l);
+        for (char *l = strtok_r(copy, "\n", &save); l && g_dl_n < DETAIL_CAP;
+             l = strtok_r(NULL, "\n", &save))
+          snprintf(g_dl[g_dl_n++], sizeof g_dl[0], " %s│%s %s", CRED, CRESET, l);
         free(copy);
       }
     }
   }
+  detail_scroll(0, detail_n); /* content changed under us; re-clamp */
+
+  {
+    char lbl[64];
+    if (g_dl_n > detail_n)
+      snprintf(lbl, sizeof lbl, "detail  %d-%d of %d", g_detail_off + 1,
+               g_detail_off + detail_n < g_dl_n ? g_detail_off + detail_n
+                                                : g_dl_n,
+               g_dl_n);
+    else
+      snprintf(lbl, sizeof lbl, "detail");
+    emit_pane_rule(s, dr, lbl, g_pane == PANE_DETAIL);
+  }
   for (int i = 0; i < detail_n; i++) {
     at_clear(s, dr + 1 + i);
-    sb_putf(s, "%s", dl[i]);
+    int idx = g_detail_off + i;
+    if (idx < g_dl_n)
+      sb_putf(s, "%s", g_dl[idx]);
   }
 
   /* log pane: labeled rule + last log_n lines of build/run output */
   int lr = dr + 1 + detail_n;
-  if (g_log_off > 0) {
+  {
     char lbl[64];
-    snprintf(lbl, sizeof lbl, "log  ▲ %d back of %d", g_log_off, g_log_n);
-    emit_labeled_rule(s, lr, lbl);
-  } else {
-    emit_labeled_rule(s, lr, "log");
+    if (g_log_off > 0)
+      snprintf(lbl, sizeof lbl, "log  ▲ %d back of %d", g_log_off, g_log_n);
+    else
+      snprintf(lbl, sizeof lbl, "log");
+    emit_pane_rule(s, lr, lbl, g_pane == PANE_LOG);
   }
   for (int i = 0; i < log_n; i++) {
     at_clear(s, lr + 1 + i);
@@ -1221,10 +1266,13 @@ static void draw_frame(sb_t *s, const row_t *rows, int nrows, int sel,
   emit_rule(s, g_rows - 1);
   at_clear(s, g_rows);
   sb_putf(s,
-          " %s↑/↓%s move  %sspace%s expand  %sr%s run  %sa%s run-all  %sf%s "
-          "only-failed%s  %sPgUp/PgDn%s log  %sq%s quit",
+          " %s←/→%s pane [%s]  %s↑/↓%s scroll  %sspace%s expand  %sr%s run  "
+          "%sa%s all  %sf%s failed%s  %sq%s quit",
+          CBOLD, CRESET,
+          g_pane == PANE_LIST ? "tests"
+                              : (g_pane == PANE_DETAIL ? "detail" : "log"),
           CBOLD, CRESET, CBOLD, CRESET, CBOLD, CRESET, CBOLD, CRESET, CBOLD,
-          CRESET, g_filter ? " [on]" : "", CBOLD, CRESET, CBOLD, CRESET);
+          CRESET, g_filter ? " [on]" : "", CBOLD, CRESET);
   if (g_status)
     sb_putf(s, "   %s%s%s", CYEL, g_status, CRESET);
   /* park the cursor out of the way (bottom-right) */
@@ -1475,14 +1523,43 @@ static int run_interactive(void) {
     else if (key == KEY_PGUP || key == KEY_PGDN) {
       int lh, dn, ln;
       layout(&lh, &dn, &ln);
-      log_scroll(key == KEY_PGUP ? ln - 1 : -(ln - 1), ln);
+      int up = (key == KEY_PGUP);
+      if (g_pane == PANE_LIST) {
+        g_sel += up ? -(lh - 1) : (lh - 1);
+        if (g_sel < 0)
+          g_sel = 0;
+        if (g_sel >= n)
+          g_sel = n - 1;
+        g_detail_off = 0;
+      } else if (g_pane == PANE_DETAIL) {
+        detail_scroll(up ? -(dn - 1) : (dn - 1), dn);
+      } else {
+        log_scroll(up ? ln - 1 : -(ln - 1), ln);
+      }
     }
-    else if (key == 'j') {
-      if (g_sel + 1 < n)
-        g_sel++;
-    } else if (key == 'k') {
-      if (g_sel > 0)
-        g_sel--;
+    else if (key == 'l' || key == 'h') {
+      g_pane = (pane_t)((g_pane + (key == 'l' ? 1 : PANE_COUNT - 1)) %
+                        PANE_COUNT);
+    } else if (key == 'j' || key == 'k') {
+      int dir = (key == 'j') ? 1 : -1;
+      int lh, dn, ln;
+      layout(&lh, &dn, &ln);
+      if (g_pane == PANE_LIST) {
+        /* Moving the selection changes what the detail pane is showing, so its
+         * scroll position belongs to the old selection, not the new one. */
+        int prev = g_sel;
+        g_sel += dir;
+        if (g_sel < 0)
+          g_sel = 0;
+        if (g_sel >= n)
+          g_sel = n - 1;
+        if (g_sel != prev)
+          g_detail_off = 0;
+      } else if (g_pane == PANE_DETAIL) {
+        detail_scroll(dir, dn);
+      } else {
+        log_scroll(-dir, ln);
+      }
     } else if (key == ' ' && n)
       comps[rows[g_sel].c].expanded = !comps[rows[g_sel].c].expanded;
     else if (key == 'r' && n) {

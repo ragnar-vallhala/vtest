@@ -15,12 +15,12 @@ enable_testing()
 # The unit under test is included, not linked: vtest is one file of statics, so
 # a test TU includes it with main() renamed away. -UNDEBUG because every check
 # is an assert() and a release build would compile them all out.
-add_executable(test_log_scroll tests/log_scroll_test.c)
-target_compile_options(test_log_scroll
+add_executable(test_pane_scroll tests/pane_scroll_test.c)
+target_compile_options(test_pane_scroll
                        PRIVATE -std=c11 -Wall -Wextra -Werror -UNDEBUG)
 if(VTEST_SANITIZE)
-  target_compile_options(test_log_scroll PRIVATE -fsanitize=address,undefined
+  target_compile_options(test_pane_scroll PRIVATE -fsanitize=address,undefined
                                                  -fno-omit-frame-pointer)
-  target_link_options(test_log_scroll PRIVATE -fsanitize=address,undefined)
+  target_link_options(test_pane_scroll PRIVATE -fsanitize=address,undefined)
 endif()
-add_test(NAME test_log_scroll COMMAND test_log_scroll)
+add_test(NAME test_pane_scroll COMMAND test_pane_scroll)

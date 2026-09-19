@@ -13,10 +13,18 @@ build/vtest --list       # print the catalog without running
 build/vtest --conf PATH  # a config other than ./vtest.conf
 ```
 
-In the TUI: `↑`/`↓` select, `space` expands a suite, `r` runs the selection,
-`a` runs everything, `f` shows only failures, **`PgUp`/`PgDn` scroll the log**,
-`q` quits. The log follows live output until you scroll back, then holds its
-position as new lines arrive.
+The TUI has three panes — **tests**, **detail**, **log**. `←`/`→` move focus
+between them and `↑`/`↓` scroll whichever holds focus, so one pair of keys
+drives all three; `PgUp`/`PgDn` page the focused pane. The focused pane's rule
+brightens, and the footer names it.
+
+`space` expands a suite, `r` runs the selection, `a` runs everything, `f` shows
+only failures, `q` quits.
+
+The log follows live output until you scroll back, then holds position as new
+lines arrive — so an error stays readable while a suite is still running. The
+detail pane holds a failure's whole captured output rather than the three lines
+that fit, and resets to the top when the selection moves.
 
 Run it from the root of the repo being tested. Suites are built on demand when a
 case is selected, so a cold tree costs nothing until you actually run something.
