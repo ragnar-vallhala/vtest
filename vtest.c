@@ -662,12 +662,18 @@ static sb_t g_frame; /* reused frame buffer */
 #define LOG_CAP 600
 static char *g_log[LOG_CAP];
 static int g_log_n = 0, g_log_head = 0;
+/* Lines scrolled back from the tail. 0 = following live output, which is what
+ * you want while a suite runs; once scrolled, new lines must not drag the view
+ * along, so the offset grows with them to hold the same lines on screen. */
+static int g_log_off = 0;
 static void log_add(const char *line) {
   free(g_log[g_log_head]);
   g_log[g_log_head] = strdup(line ? line : "");
   g_log_head = (g_log_head + 1) % LOG_CAP;
   if (g_log_n < LOG_CAP)
     g_log_n++;
+  if (g_log_off > 0 && g_log_off < LOG_CAP)
+    g_log_off++;
 }
 static void log_addf(const char *fmt, ...) {
   char b[2048];
@@ -677,6 +683,17 @@ static void log_addf(const char *fmt, ...) {
   va_end(ap);
   log_add(b);
 }
+static void log_scroll(int delta, int visible) {
+  int max = g_log_n - visible;
+  if (max < 0)
+    max = 0;
+  g_log_off += delta;
+  if (g_log_off > max)
+    g_log_off = max;
+  if (g_log_off < 0)
+    g_log_off = 0;
+}
+
 /* a in [0, g_log_n): line index oldest(0)..newest(g_log_n-1). */
 static const char *log_line(int a) {
   if (a < 0 || a >= g_log_n)
@@ -976,6 +993,8 @@ static void discover_all(void) {
 
 /* ============================================================ full-screen TUI */
 #define KEY_RESIZE (-2)
+#define KEY_PGUP (-3)
+#define KEY_PGDN (-4)
 static int read_key(void) {
   unsigned char c;
   ssize_t r = read(STDIN_FILENO, &c, 1);
@@ -992,6 +1011,15 @@ static int read_key(void) {
         return 'k'; /* up */
       if (seq[1] == 'B')
         return 'j'; /* down */
+      /* PgUp/PgDn are "ESC [ 5 ~" / "ESC [ 6 ~" — one byte longer than the
+       * arrows, so the trailing tilde has to be consumed or it is read as a
+       * keystroke of its own. */
+      if (seq[1] == '5' || seq[1] == '6') {
+        unsigned char tilde;
+        if (read(STDIN_FILENO, &tilde, 1) == 1 && tilde == '~')
+          return seq[1] == '5' ? KEY_PGUP : KEY_PGDN;
+        return '\x1b';
+      }
     }
     return '\x1b';
   }
@@ -1175,10 +1203,16 @@ static void draw_frame(sb_t *s, const row_t *rows, int nrows, int sel,
 
   /* log pane: labeled rule + last log_n lines of build/run output */
   int lr = dr + 1 + detail_n;
-  emit_labeled_rule(s, lr, "log");
+  if (g_log_off > 0) {
+    char lbl[64];
+    snprintf(lbl, sizeof lbl, "log  ▲ %d back of %d", g_log_off, g_log_n);
+    emit_labeled_rule(s, lr, lbl);
+  } else {
+    emit_labeled_rule(s, lr, "log");
+  }
   for (int i = 0; i < log_n; i++) {
     at_clear(s, lr + 1 + i);
-    const char *l = log_line(g_log_n - log_n + i);
+    const char *l = log_line(g_log_n - log_n - g_log_off + i);
     if (l)
       sb_putf(s, " %s", l);
   }
@@ -1188,9 +1222,9 @@ static void draw_frame(sb_t *s, const row_t *rows, int nrows, int sel,
   at_clear(s, g_rows);
   sb_putf(s,
           " %s↑/↓%s move  %sspace%s expand  %sr%s run  %sa%s run-all  %sf%s "
-          "only-failed%s  %sq%s quit",
+          "only-failed%s  %sPgUp/PgDn%s log  %sq%s quit",
           CBOLD, CRESET, CBOLD, CRESET, CBOLD, CRESET, CBOLD, CRESET, CBOLD,
-          CRESET, g_filter ? " [on]" : "", CBOLD, CRESET);
+          CRESET, g_filter ? " [on]" : "", CBOLD, CRESET, CBOLD, CRESET);
   if (g_status)
     sb_putf(s, "   %s%s%s", CYEL, g_status, CRESET);
   /* park the cursor out of the way (bottom-right) */
@@ -1438,6 +1472,11 @@ static int run_interactive(void) {
       continue;
     if (key == 'q')
       break;
+    else if (key == KEY_PGUP || key == KEY_PGDN) {
+      int lh, dn, ln;
+      layout(&lh, &dn, &ln);
+      log_scroll(key == KEY_PGUP ? ln - 1 : -(ln - 1), ln);
+    }
     else if (key == 'j') {
       if (g_sel + 1 < n)
         g_sel++;

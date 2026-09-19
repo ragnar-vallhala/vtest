@@ -13,6 +13,11 @@ build/vtest --list       # print the catalog without running
 build/vtest --conf PATH  # a config other than ./vtest.conf
 ```
 
+In the TUI: `↑`/`↓` select, `space` expands a suite, `r` runs the selection,
+`a` runs everything, `f` shows only failures, **`PgUp`/`PgDn` scroll the log**,
+`q` quits. The log follows live output until you scroll back, then holds its
+position as new lines arrive.
+
 Run it from the root of the repo being tested. Suites are built on demand when a
 case is selected, so a cold tree costs nothing until you actually run something.
 
@@ -87,3 +92,14 @@ adapter.
 
 Apache License 2.0 — see [LICENSE.md](LICENSE.md). Copyright (C) 2026 NAVRobotec
 Pvt Ltd.
+
+## Testing vtest
+
+```sh
+cmake -S . -B build && ctest --test-dir build
+build/vtest --run          # or run vtest against itself
+```
+
+vtest is one file of statics, so a test reaches the unit under test by
+including it with `main()` renamed away — no header extraction for logic that
+is not a library, and no test scaffolding in the production file.
