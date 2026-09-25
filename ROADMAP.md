@@ -72,6 +72,26 @@ carry Vayu-specific code.
       by default, unknown keys are errors. Bump each consumer's pin together
       with its `vtest.conf`.
 
+## Phase 6 — NavHAL: vtest replaces ntest
+
+ntest (`NavHAL/tools/ntest`, 1014 lines of Python) is retired; vtest is the
+front end and the shell backends that predate ntest do the work.
+
+- [ ] vtest: a `check` exiting 77 is SKIP, not FAIL (the automake/ctest
+      convention) -- a HIL board that is not plugged in is not a failure.
+- [ ] `tools/hil/run.sh`: exit 77 when the board is absent (today 3); port
+      ntest's SWD console capture (openocd + gdb, `CONSOLE=swd`, used by
+      navixsmf401re).
+- [ ] `tools/samples.sh <arch>`: the sample matrix, back in shell; the three
+      `build_all_*samples.sh` shims call it instead of ntest.
+- [ ] `tools/coverage.sh [--min-lines N]`: host gcov + gcovr, gate via
+      `--fail-under-line` (ntest's per-area floors are empty today).
+- [ ] `vtest.conf` + `tools/vtest.sh` (docs/testing/vtest.md): host via ctest,
+      one check per PIL/HIL board, samples, cap-contract, coverage.
+- [ ] CI: ci.yml, renode.yml, release-gate.yml call the scripts directly.
+- [ ] Delete `tools/ntest`, `docs/testing/ntest.md`, `run_host_tests.sh`;
+      reword the board confs' "read by ntest" comments.
+
 ## Left out on purpose
 
 - .deb / Homebrew — when someone else installs it.
