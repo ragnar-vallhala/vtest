@@ -4,6 +4,16 @@ A single-file C program that discovers and runs a repo's test suites, as an
 interactive TUI or in batch. Zero dependencies: raw ANSI + termios, no ncurses,
 no libraries, no build system.
 
+Install once per machine; every repo then uses the same `vtest` from PATH:
+
+```sh
+cmake -S . -B build && cmake --build build && cmake --install build --prefix ~/.local
+vtest --version          # the exact commit installed
+```
+
+That installs `vtest` and `vtest-loc` (loc.sh) into `~/.local/bin`. Or build
+it by hand, with no CMake:
+
 ```sh
 cc -std=c11 -O2 -Wall -Wextra vtest.c -o build/vtest
 

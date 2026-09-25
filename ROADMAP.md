@@ -50,8 +50,9 @@ carry Vayu-specific code.
 
 ## Phase 5 — install once
 
-- [ ] `project(vtest VERSION 2.0.0)`, `install(TARGETS vtest)`,
-      `install(PROGRAMS loc.sh RENAME vtest-loc)`, `--version`.
+- [x] `install(TARGETS vtest)`,
+      `install(PROGRAMS loc.sh RENAME vtest-loc)`, `--version` from
+      `git describe` (a hand-built binary says `dev`).
 
       cmake -S . -B build && cmake --build build && cmake --install build --prefix ~/.local
 

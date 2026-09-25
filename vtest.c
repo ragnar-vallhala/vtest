@@ -1738,8 +1738,12 @@ static int run_report(int do_run) {
   return 0;
 }
 
+#ifndef VTEST_VERSION
+#define VTEST_VERSION "dev" /* built by hand, not through CMake */
+#endif
+
 static const char kUsage[] =
-    "usage: vtest [--run | --list] [--conf PATH]\n"
+    "usage: vtest [--run | --list] [--conf PATH] [--version]\n"
     "  (none)       interactive TUI\n"
     "  --run        discover, run everything, report; exit 1 on any failure\n"
     "  --list       discover and print the catalog without running\n"
@@ -1755,7 +1759,10 @@ int main(int argc, char **argv) {
       list_only = 1;
     else if (strcmp(argv[i], "--conf") == 0 && i + 1 < argc)
       cfg = argv[++i];
-    else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+    else if (strcmp(argv[i], "--version") == 0) {
+      puts("vtest " VTEST_VERSION);
+      return 0;
+    } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
       fputs(kUsage, stdout);
       return 0;
     } else {
