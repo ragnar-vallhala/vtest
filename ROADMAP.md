@@ -55,10 +55,18 @@ carry Vayu-specific code.
 
       cmake -S . -B build && cmake --build build && cmake --install build --prefix ~/.local
 
-- [ ] Both consumers' `[loc]` checks call `vtest/loc.sh` from the submodule;
-      switch them to `vtest-loc` once it is installed.
-- [ ] Vayu `vayu.sh` and NavLink `scripts/vtest.sh`: use `vtest` from PATH if
-      installed, else build the submodule (CI keeps working without install).
+- [ ] Consumers, each in its own repo:
+
+      | repo    | launcher (prefer `vtest` on PATH, else build) | `[loc]` -> `vtest-loc` | pin |
+      |---------|-----------------------------------------------|------------------------|-----|
+      | vayu    | `tools/scripts/vayu.sh` `build_vtest`/`run_vtest` | `vtest/loc.sh`      | `vtest` |
+      | navlink | `scripts/vtest.sh`                            | `vtest/loc.sh`         | `vtest` |
+      | vaios   | `tools/vtest.sh` (keep its `srctree` export)  | `extern/vtest/loc.sh`  | `extern/vtest` |
+
+      NavHAL does not use vtest (`navtest` is its own framework). vayu-navigator
+      has no vtest, but `tools/dev/run_clang_tidy.sh` still lists
+      `vtest/vtest.c` -- a stale line to delete. vayu's own navlink submodule
+      carries a second vtest pin, bumped by bumping navlink.
 - [ ] Release v2.0.0 — breaking: a crashed suite fails, pytest builds nothing
       by default, unknown keys are errors. Bump each consumer's pin together
       with its `vtest.conf`.
