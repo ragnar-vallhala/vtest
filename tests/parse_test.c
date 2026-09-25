@@ -147,9 +147,32 @@ static int config(void) {
   CHECK(load_text("[a\n") == -2, "config: unterminated suite name");
   CHECK(load_text("[a]\njunk\n") == -2, "config: line without =");
 
+  CHECK(load_text("[py]\nadapter = pytest\nbuild = make sim\n") == 1 &&
+            !strcmp(comps[0].build, "make sim"),
+        "config: build key");
   CHECK(load_text("[py]\nadapter = pytest\n") == 1 &&
             !strcmp(comps[0].filter, "."),
         "config: pytest with no filter collects the whole rootdir");
+  return 0;
+}
+
+/* The default build per adapter, and `build =` replacing it. */
+static int builds(void) {
+  char b[512];
+  comp_t c = {.adapter = AD_CTEST, .test_dir = "bd", .tprefix = "test_"};
+  CHECK(!strcmp(build_cmd(b, sizeof b, &c, NULL), "cmake --build 'bd' 2>&1"),
+        "build: ctest suite");
+  CHECK(!strcmp(build_cmd(b, sizeof b, &c, "x"),
+                "cmake --build 'bd' --target 'test_x' 2>&1"),
+        "build: ctest single case");
+  c.adapter = AD_PYTEST;
+  CHECK(!strcmp(build_cmd(b, sizeof b, &c, NULL), "true"),
+        "build: pytest builds nothing by default");
+  c.build = "make sim";
+  c.configure = "cmake -S . -B bd";
+  CHECK(!strcmp(build_cmd(b, sizeof b, &c, NULL),
+                "cmake -S . -B bd 2>&1 && make sim 2>&1"),
+        "build: build key after configure");
   return 0;
 }
 
@@ -168,7 +191,7 @@ static int unreported(void) {
 }
 
 int main(void) {
-  if (ctest_lines() || pytest_lines() || config() || unreported())
+  if (ctest_lines() || pytest_lines() || config() || builds() || unreported())
     return 1;
   printf("  %d checks, 0 failures\n", checks);
   return 0;

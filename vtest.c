@@ -84,6 +84,7 @@ typedef struct {
   const char *tprefix;   /* ctest: test name -> build target = tprefix + name */
   const char *cmd;       /* check: the command whose exit status is the result */
   const char *configure; /* optional: run before the build, e.g. cmake -S -B */
+  const char *build;     /* optional: replaces the adapter's default build */
   tcase_t *cases;
   int ncases;
   int expanded;
@@ -116,6 +117,7 @@ static char g_python[4128] =
  *     prefix  = test_          ctest: test name -> build target
  *     cmd     = make lint      check: the command whose exit status is the verdict
  *     configure = cmake -S . -B build_san -DSAN=ON    run before the build
+ *     build   = make sim       replaces the default build (ctest: its targets)
  *     open    = 1              start the group expanded in the TUI
  *
  * Unset keys are empty/NULL, which both adapters already treat as "no filter"
@@ -203,6 +205,8 @@ static int load_config(const char *path) {
       cur->cmd = cfg_dup(v);
     } else if (!strcmp(k, "configure")) {
       cur->configure = cfg_dup(v);
+    } else if (!strcmp(k, "build")) {
+      cur->build = cfg_dup(v);
     } else if (!strcmp(k, "open")) {
       cur->expanded = atoi(v);
     } else {
@@ -513,14 +517,12 @@ static void pytest_discover(comp_t *c) {
 
 /* The pytest run command: run from the rootdir (nodeids stay rootdir-relative,
  * matching discovery). PYTHONUNBUFFERED + stdbuf -oL so the pipe streams per
- * test. Integration tests read VAYU_SITL_RTOS_BIN (the single in-process SITL
- * binary that replaced the vsim_d + vayu_sitl pair). */
+ * test. Anything the tests need from the environment is the caller's to set. */
 static void pytest_run_cmd(char *buf, size_t n, comp_t *c, const char *only) {
   snprintf(buf, n,
            "cd '%s' && PYTHONUNBUFFERED=1 "
-           "VAYU_SITL_RTOS_BIN='%s/build_sitl_rtos/vayu_sitl_rtos' "
            "stdbuf -oL -eL %s -m pytest '%s' -v 2>&1",
-           c->test_dir, g_cwd, g_python, only ? only : c->filter);
+           c->test_dir, g_python, only ? only : c->filter);
 }
 
 /* Parse one line of pytest -v output: "<nodeid> PASSED [..%]". */
@@ -732,8 +734,9 @@ static const char *log_line(int a) {
 }
 
 /* The on-demand build command for a component (only != NULL = single ctest
- * target). ctest builds its CMake target(s); pytest builds the single
- * in-process SITL binary its integration tests drive. */
+ * target). ctest builds its CMake target(s); pytest and check build nothing.
+ * A `build =` key replaces the default for any adapter -- a pytest suite that
+ * drives a compiled binary builds it that way. */
 static const char *build_cmd(char *buf, size_t n, comp_t *c, const char *only) {
   /* `configure` creates the build dir when it is missing -- which is what makes
    * an ASan or coverage suite declarable: same cases, different -D flags, a
@@ -743,11 +746,10 @@ static const char *build_cmd(char *buf, size_t n, comp_t *c, const char *only) {
   if (c->configure)
     snprintf(pre, sizeof pre, "%s 2>&1 && ", c->configure);
 
-  if (c->adapter == AD_CHECK)
+  if (c->build)
+    snprintf(buf, n, "%s%s 2>&1", pre, c->build);
+  else if (c->adapter != AD_CTEST)
     snprintf(buf, n, "%strue", pre); /* nothing to compile; configure may exist */
-  else if (c->adapter == AD_PYTEST)
-    snprintf(buf, n, "%scmake --build build_sitl_rtos --target vayu_sitl_rtos 2>&1",
-             pre);
   else if (only)
     snprintf(buf, n, "%scmake --build '%s' --target '%s%s' 2>&1", pre,
              c->test_dir, c->tprefix, only);
@@ -1576,8 +1578,8 @@ static void on_run_line(void *v, const char *line) {
   }
 }
 
-/* Build the lazily-needed binaries (single ctest target / whole comp / pytest's
- * SITL+vsim deps), streamed. Returns the child exit code (or -2 if aborted). */
+/* Build the lazily-needed binaries (single ctest target / whole comp / the
+ * suite's `build =`), streamed. Returns the child exit code (or -2 if aborted). */
 static int build_suite(comp_t *c, const char *only, int interactive) {
   char cmd[1024];
   build_cmd(cmd, sizeof cmd, c, only);
@@ -1764,7 +1766,7 @@ int main(int argc, char **argv) {
   if (!cfg)
     cfg = "vtest.conf";
 
-  /* repo root (for absolute SITL/vsim binary paths) + pytest interpreter. */
+  /* repo root (for the title and the .venv interpreter path). */
   if (!getcwd(g_cwd, sizeof g_cwd))
     snprintf(g_cwd, sizeof g_cwd, ".");
   const char *base = strrchr(g_cwd, '/');

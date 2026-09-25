@@ -24,12 +24,12 @@ carry Vayu-specific code.
 
 ## Phase 2 — generic
 
-- [ ] A `build =` key for any suite. Delete the hard-coded
+- [x] A `build =` key for any suite. Deleted the hard-coded
       `vayu_sitl_rtos` build; pytest builds nothing by default.
-- [ ] Delete `VAYU_SITL_RTOS_BIN` from the pytest run command; `vayu.sh`
-      exports it.
-- [ ] Vayu (its own repo): add the `build =` line to `vtest.conf` and the
-      export to `vayu.sh`.
+- [x] Deleted `VAYU_SITL_RTOS_BIN` from the pytest run command; whoever
+      launches vtest exports what its tests need.
+- [x] Consumers: nothing to change. Neither Vayu nor NavLink declares a pytest
+      suite, so the removed code was dead for both.
 
 ## Phase 3 — limits
 
@@ -55,6 +55,8 @@ carry Vayu-specific code.
 
       cmake -S . -B build && cmake --build build && cmake --install build --prefix ~/.local
 
+- [ ] Both consumers' `[loc]` checks call `vtest/loc.sh` from the submodule;
+      switch them to `vtest-loc` once it is installed.
 - [ ] Vayu `vayu.sh` and NavLink `scripts/vtest.sh`: use `vtest` from PATH if
       installed, else build the submodule (CI keeps working without install).
 - [ ] Release v2.0.0 — breaking: a crashed suite fails, pytest builds nothing

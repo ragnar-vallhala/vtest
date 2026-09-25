@@ -44,6 +44,7 @@ filter  = ^tst_          # ctest: -R regex; pytest: subdir
 prefix  = test_          # ctest: test name -> build target
 cmd     = make lint      # check: the command whose exit status is the verdict
 configure = cmake -S sim/host -B build_san -DSAN=ON   # run before the build
+build   = make sim          # replaces the default build (see below)
 open    = 1              # start the group expanded in the TUI
 ```
 
@@ -57,7 +58,9 @@ and ignoring it would run the suite some other way than the conf asks.
 - **ctest** — discover with `ctest -N`, run with `--output-on-failure`. `prefix`
   maps a test name to its CMake target so a single case builds alone.
 - **pytest** — discover with `--collect-only -q`, run with `-v`, from the rootdir
-  so nodeids match between the two.
+  so nodeids match between the two. Builds nothing unless the suite sets `build =` —
+  e.g. integration tests that drive a compiled simulator. Environment those
+  tests need (a binary's path) is exported by whatever launches vtest.
 - **check** — a whole-repo gate that is one command and one verdict: a linter, a
   formatter, a coverage ratchet, a line count. `cmd` is the command; its exit
   status is the result and its output goes to the log. Modelled as a suite with
