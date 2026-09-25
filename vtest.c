@@ -44,6 +44,7 @@
 #include <sys/select.h>
 #include <sys/wait.h>
 #include <termios.h>
+#include <fcntl.h>
 #include <unistd.h>
 
 /* realloc() into the same pointer leaks the original and then dereferences
@@ -753,6 +754,22 @@ static void on_winch(int sig) {
   g_resized = 1;
 }
 
+/* A suite's child inherits this terminal, and plenty of things reset it
+ * (Renode's console, st-flash, anything calling stty or tcsetattr). Canonical
+ * mode with VMIN=0 makes our next read() return 0, which used to read as a
+ * keystroke. Re-assert our own mode after every run instead. */
+static void raw_reassert(void) {
+  if (!raw_active)
+    return;
+  struct termios t;
+  if (tcgetattr(STDIN_FILENO, &t) != 0)
+    return;
+  t.c_lflag &= (unsigned)~(ICANON | ECHO);
+  t.c_cc[VMIN] = 1;
+  t.c_cc[VTIME] = 0;
+  tcsetattr(STDIN_FILENO, TCSANOW, &t);
+}
+
 static void raw_enter(void) {
   tcgetattr(STDIN_FILENO, &saved_tio);
   struct termios t = saved_tio;
@@ -777,14 +794,19 @@ static void raw_enter(void) {
   query_winsize();
 }
 
+/* Advanced by the streaming loop's idle wake, so a running case animates even
+ * while its suite prints nothing (a cmake build, a Renode boot). */
+static unsigned g_spin = 0;
+
 static const char *glyph(status_t s) {
+  static const char *spin[] = {"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"};
   switch (s) {
   case ST_PASS:
     return "✔";
   case ST_FAIL:
     return "✘";
   case ST_RUNNING:
-    return "…";
+    return spin[g_spin % (sizeof spin / sizeof *spin)];
   case ST_SKIP:
     return "○";
   default:
@@ -1002,9 +1024,24 @@ static void discover_all(void) {
 #define KEY_PGDN (-4)
 static int read_key(void) {
   unsigned char c;
-  ssize_t r = read(STDIN_FILENO, &c, 1);
-  if (r != 1)
-    return (r < 0 && errno == EINTR) ? KEY_RESIZE : 'q';
+  ssize_t r;
+  /* read() returning 0 on a terminal means someone put it back in canonical
+   * mode (a child that touched termios), not that the user asked to quit --
+   * which is what made the TUI exit by itself when a run finished. Restore our
+   * mode and read again; only a stdin that is really gone ends the session. */
+  for (int tries = 0; (r = read(STDIN_FILENO, &c, 1)) != 1; tries++) {
+    if (r < 0 && errno == EINTR)
+      return KEY_RESIZE;
+    if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) && tries < 100) {
+      raw_reassert();
+      continue;
+    }
+    if (r == 0 && isatty(STDIN_FILENO) && tries < 100) {
+      raw_reassert();
+      continue;
+    }
+    return 'q'; /* stdin closed / not a terminal: nothing more to read */
+  }
   if (c == '\x1b') {
     unsigned char seq[2];
     if (read(STDIN_FILENO, &seq[0], 1) != 1)
@@ -1279,6 +1316,57 @@ static void draw_frame(sb_t *s, const row_t *rows, int nrows, int sel,
   sb_putf(s, "\x1b[%d;%dH", g_rows, g_cols);
 }
 
+/* Pane/selection keys: focus (h/l, left/right), scroll (j/k, up/down) and
+ * paging. Shared by the idle loop and the streaming run loop, so navigation
+ * works while a suite runs instead of the keystroke being dropped. Returns 1
+ * if the key was a navigation key. */
+static int nav_key(int key, const row_t *rows, int n) {
+  int lh, dn, ln;
+  layout(&lh, &dn, &ln);
+  (void)rows;
+  if (key == KEY_PGUP || key == KEY_PGDN) {
+    int up = (key == KEY_PGUP);
+    if (g_pane == PANE_LIST) {
+      g_sel += up ? -(lh - 1) : (lh - 1);
+      if (g_sel < 0)
+        g_sel = 0;
+      if (g_sel >= n)
+        g_sel = n ? n - 1 : 0;
+      g_detail_off = 0;
+    } else if (g_pane == PANE_DETAIL) {
+      detail_scroll(up ? -(dn - 1) : (dn - 1), dn);
+    } else {
+      log_scroll(up ? ln - 1 : -(ln - 1), ln);
+    }
+    return 1;
+  }
+  if (key == 'l' || key == 'h') {
+    g_pane = (pane_t)((g_pane + (key == 'l' ? 1 : PANE_COUNT - 1)) % PANE_COUNT);
+    return 1;
+  }
+  if (key == 'j' || key == 'k') {
+    int dir = (key == 'j') ? 1 : -1;
+    if (g_pane == PANE_LIST) {
+      /* Moving the selection changes what the detail pane is showing, so its
+       * scroll position belongs to the old selection, not the new one. */
+      int prev = g_sel;
+      g_sel += dir;
+      if (g_sel < 0)
+        g_sel = 0;
+      if (g_sel >= n)
+        g_sel = n ? n - 1 : 0;
+      if (g_sel != prev)
+        g_detail_off = 0;
+    } else if (g_pane == PANE_DETAIL) {
+      detail_scroll(dir, dn);
+    } else {
+      log_scroll(-dir, ln);
+    }
+    return 1;
+  }
+  return 0;
+}
+
 /* Rebuild rows from g_filter, clamp selection/scroll, draw the whole frame. */
 static void repaint(void) {
   row_t rows[256];
@@ -1328,6 +1416,18 @@ static int stream_exec(const char *cmd, int interactive,
     dup2(pfd[1], STDERR_FILENO);
     close(pfd[0]);
     close(pfd[1]);
+    /* A suite must not inherit the interactive terminal: a child that reads
+     * stdin eats the keystrokes meant for the TUI (renode --console, a prompt),
+     * one that changes termios leaves our raw mode behind, and in this child's
+     * own process group touching the terminal raises SIGTTOU and stops it --
+     * with the run then hanging forever in waitpid. /dev/null gives every one
+     * of those an immediate EOF instead. */
+    int devnull = open("/dev/null", O_RDONLY);
+    if (devnull >= 0) {
+      dup2(devnull, STDIN_FILENO);
+      if (devnull != STDIN_FILENO)
+        close(devnull);
+    }
     execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
     _exit(127);
   }
@@ -1346,7 +1446,17 @@ static int stream_exec(const char *cmd, int interactive,
       if (STDIN_FILENO > maxfd)
         maxfd = STDIN_FILENO;
     }
-    int sr = select(maxfd + 1, &rs, NULL, NULL, NULL);
+    /* A suite can be silent for seconds (a cmake build, a Renode boot). Wake
+     * anyway so the spinner turns and a keystroke is never left waiting. */
+    struct timeval tv = {0, 200000};
+    int sr = select(maxfd + 1, &rs, NULL, NULL, interactive ? &tv : NULL);
+    if (sr == 0) {
+      if (interactive) {
+        g_spin++;
+        repaint();
+      }
+      continue;
+    }
     if (sr < 0) {
       if (errno == EINTR) { /* SIGWINCH */
         if (g_resized) {
@@ -1359,11 +1469,20 @@ static int stream_exec(const char *cmd, int interactive,
       break;
     }
     if (interactive && FD_ISSET(STDIN_FILENO, &rs)) {
-      unsigned char ch;
-      if (read(STDIN_FILENO, &ch, 1) == 1 && (ch == 'q' || ch == 3)) {
+      int key = read_key();
+      if (key == 'q' || key == 3) {
         aborted = 1;
         kill(-pid, SIGTERM);
         log_add("  ⨯ aborted");
+      } else if (key == KEY_RESIZE) {
+        query_winsize();
+        repaint();
+      } else {
+        /* Navigation only: 'r'/'a'/space would start a run inside a run. */
+        row_t krows[256];
+        int kn = build_rows(krows, 256, g_filter);
+        if (nav_key(key, krows, kn))
+          repaint();
       }
     }
     if (FD_ISSET(pfd[0], &rs)) {
@@ -1389,6 +1508,8 @@ static int stream_exec(const char *cmd, int interactive,
   close(pfd[0]);
   int status = 0;
   waitpid(pid, &status, 0);
+  if (interactive)
+    raw_reassert(); /* the child may have reset the terminal under us */
   if (aborted)
     return -2;
   return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
@@ -1520,46 +1641,8 @@ static int run_interactive(void) {
       continue;
     if (key == 'q')
       break;
-    else if (key == KEY_PGUP || key == KEY_PGDN) {
-      int lh, dn, ln;
-      layout(&lh, &dn, &ln);
-      int up = (key == KEY_PGUP);
-      if (g_pane == PANE_LIST) {
-        g_sel += up ? -(lh - 1) : (lh - 1);
-        if (g_sel < 0)
-          g_sel = 0;
-        if (g_sel >= n)
-          g_sel = n - 1;
-        g_detail_off = 0;
-      } else if (g_pane == PANE_DETAIL) {
-        detail_scroll(up ? -(dn - 1) : (dn - 1), dn);
-      } else {
-        log_scroll(up ? ln - 1 : -(ln - 1), ln);
-      }
-    }
-    else if (key == 'l' || key == 'h') {
-      g_pane = (pane_t)((g_pane + (key == 'l' ? 1 : PANE_COUNT - 1)) %
-                        PANE_COUNT);
-    } else if (key == 'j' || key == 'k') {
-      int dir = (key == 'j') ? 1 : -1;
-      int lh, dn, ln;
-      layout(&lh, &dn, &ln);
-      if (g_pane == PANE_LIST) {
-        /* Moving the selection changes what the detail pane is showing, so its
-         * scroll position belongs to the old selection, not the new one. */
-        int prev = g_sel;
-        g_sel += dir;
-        if (g_sel < 0)
-          g_sel = 0;
-        if (g_sel >= n)
-          g_sel = n - 1;
-        if (g_sel != prev)
-          g_detail_off = 0;
-      } else if (g_pane == PANE_DETAIL) {
-        detail_scroll(dir, dn);
-      } else {
-        log_scroll(-dir, ln);
-      }
+    if (nav_key(key, rows, n)) {
+      /* handled */
     } else if (key == ' ' && n)
       comps[rows[g_sel].c].expanded = !comps[rows[g_sel].c].expanded;
     else if (key == 'r' && n) {
