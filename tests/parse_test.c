@@ -27,6 +27,12 @@
 #include "../vtest.c"
 #undef main
 
+/* load_config is called once per vtest process and never freed; this test
+ * calls it a dozen times. Turned off here rather than through ASAN_OPTIONS,
+ * which would replace the options vtest itself runs the suite with. */
+int __lsan_is_turned_off(void);
+int __lsan_is_turned_off(void) { return 1; }
+
 static int checks = 0;
 #define CHECK(c, what)                                                         \
   do {                                                                         \
@@ -91,10 +97,19 @@ static int pytest_lines(void) {
   return 0;
 }
 
-static int config(void) {
+/* Load `text` as a vtest.conf; returns what load_config returns. */
+static int load_text(const char *text) {
   char path[] = "/tmp/vtest_parse_XXXXXX";
   int fd = mkstemp(path);
-  CHECK(fd >= 0, "config: temp file");
+  if (fd < 0 || write(fd, text, strlen(text)) != (ssize_t)strlen(text))
+    return -99;
+  close(fd);
+  int n = load_config(path);
+  unlink(path);
+  return n;
+}
+
+static int config(void) {
   const char *text = "# a comment\n"
                      "[sitl]\n"
                      "adapter = ctest\n"
@@ -110,12 +125,7 @@ static int config(void) {
                      "[lint]\n"
                      "  adapter = check\n"
                      "  cmd     = make lint  \n";
-  CHECK(write(fd, text, strlen(text)) == (ssize_t)strlen(text),
-        "config: written");
-  close(fd);
-  int n = load_config(path);
-  unlink(path);
-
+  int n = load_text(text);
   CHECK(n == 3 && NCOMPS == 3, "config: three suites");
   CHECK(!strcmp(comps[0].name, "sitl") && comps[0].adapter == AD_CTEST,
         "config: sitl is ctest");
@@ -128,12 +138,37 @@ static int config(void) {
   CHECK(comps[2].adapter == AD_CHECK && !strcmp(comps[2].cmd, "make lint"),
         "config: indented keys, trailing spaces trimmed");
   CHECK(!strcmp(comps[2].test_dir, "."), "config: dir defaults to .");
-  CHECK(load_config("/nonexistent/vtest.conf") < 0, "config: missing file");
+  CHECK(load_config("/nonexistent/vtest.conf") == -1, "config: missing file");
+
+  /* Strict: anything not understood is an error, not a silent default. */
+  CHECK(load_text("[a]\nadapter = pytset\n") == -2, "config: unknown adapter");
+  CHECK(load_text("[a]\nbuidl = make\n") == -2, "config: unknown key");
+  CHECK(load_text("adapter = ctest\n") == -2, "config: key before a suite");
+  CHECK(load_text("[a\n") == -2, "config: unterminated suite name");
+  CHECK(load_text("[a]\njunk\n") == -2, "config: line without =");
+
+  CHECK(load_text("[py]\nadapter = pytest\n") == 1 &&
+            !strcmp(comps[0].filter, "."),
+        "config: pytest with no filter collects the whole rootdir");
+  return 0;
+}
+
+/* A runner that dies without reporting a case must fail it, never leave it to
+ * read as a pass. A missing test dir makes ctest exit non-zero with no result
+ * lines -- the same shape as a crash. */
+static int unreported(void) {
+  tcase_t cases[1] = {{.name = "t", .status = ST_RUNNING}};
+  comp_t c = {.adapter = AD_CTEST, .test_dir = "/nonexistent", .tprefix = "",
+              .cases = cases, .ncases = 1};
+  int failed = run_suite(&c, NULL, 0);
+  CHECK(failed == 1, "unreported: counted as a failure");
+  CHECK(cases[0].status == ST_FAIL, "unreported: case marked failed");
+  CHECK(cases[0].detail != NULL, "unreported: says why");
   return 0;
 }
 
 int main(void) {
-  if (ctest_lines() || pytest_lines() || config())
+  if (ctest_lines() || pytest_lines() || config() || unreported())
     return 1;
   printf("  %d checks, 0 failures\n", checks);
   return 0;

@@ -25,3 +25,4 @@ foreach(t pane_scroll parse)
   endif()
   add_test(NAME test_${t} COMMAND test_${t})
 endforeach()
+

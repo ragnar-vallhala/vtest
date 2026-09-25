@@ -122,15 +122,28 @@ static char g_python[4128] =
  * and "no prefix". */
 static char *cfg_dup(const char *v) { return *v ? strdup(v) : NULL; }
 
+/* Returns the number of suites, -1 if the file cannot be opened, or -2 on a
+ * line vtest does not understand (already reported). Strict on purpose: a key
+ * this build does not know is most likely one a newer vtest added, and ignoring
+ * it would run the suite some other way than its conf asks. */
+static int cfg_error(FILE *fp, const char *path, int ln, const char *what,
+                     const char *s) {
+  fprintf(stderr, "vtest: %s:%d: %s '%s'\n", path, ln, what, s);
+  fclose(fp);
+  return -2;
+}
+
 static int load_config(const char *path) {
   FILE *fp = fopen(path, "r");
   if (!fp)
     return -1;
-  int cap = 8;
+  NCOMPS = 0;
+  int cap = 8, ln = 0;
   comps = calloc((size_t)cap, sizeof *comps);
   char line[4096];
   comp_t *cur = NULL;
   while (fgets(line, sizeof line, fp)) {
+    ln++;
     char *p = line;
     while (*p == ' ' || *p == '\t')
       p++;
@@ -142,7 +155,7 @@ static int load_config(const char *path) {
     if (*p == '[') { /* a new suite */
       char *e = strchr(p, ']');
       if (!e)
-        continue;
+        return cfg_error(fp, path, ln, "unterminated suite name", p);
       *e = 0;
       if (NCOMPS == cap) {
         cap *= 2;
@@ -157,8 +170,10 @@ static int load_config(const char *path) {
       continue;
     }
     char *eq = strchr(p, '=');
-    if (!eq || !cur)
-      continue;
+    if (!eq)
+      return cfg_error(fp, path, ln, "not a key = value line", p);
+    if (!cur)
+      return cfg_error(fp, path, ln, "key before any [suite]", p);
     *eq = 0;
     char *k = p, *v = eq + 1;
     for (size_t i = strlen(k); i && (k[i - 1] == ' ' || k[i - 1] == '\t');)
@@ -172,9 +187,11 @@ static int load_config(const char *path) {
       } else if (!strcmp(v, "check")) {
         cur->adapter = AD_CHECK;
         cur->kind = "check";
-      } else {
+      } else if (!strcmp(v, "ctest")) {
         cur->adapter = AD_CTEST;
         cur->kind = "ctest";
+      } else {
+        return cfg_error(fp, path, ln, "unknown adapter", v);
       }
     } else if (!strcmp(k, "dir")) {
       cur->test_dir = strdup(v);
@@ -188,13 +205,19 @@ static int load_config(const char *path) {
       cur->configure = cfg_dup(v);
     } else if (!strcmp(k, "open")) {
       cur->expanded = atoi(v);
+    } else {
+      return cfg_error(fp, path, ln, "unknown key", k);
     }
   }
   fclose(fp);
-  /* ctest treats a NULL prefix as "", every adapter tolerates a NULL filter. */
-  for (int i = 0; i < NCOMPS; i++)
+  /* ctest treats a NULL prefix as "" and a NULL filter as "all". pytest takes
+   * the filter as a path, so "all" is the rootdir itself. */
+  for (int i = 0; i < NCOMPS; i++) {
     if (!comps[i].tprefix)
       comps[i].tprefix = "";
+    if (!comps[i].filter && comps[i].adapter == AD_PYTEST)
+      comps[i].filter = ".";
+  }
   return NCOMPS;
 }
 
@@ -507,7 +530,7 @@ static void pytest_parse_line(comp_t *c, const char *l, int *failed) {
     status_t st;
   } kTags[] = {
       {" PASSED", ST_PASS},  {" FAILED", ST_FAIL}, {" ERROR", ST_FAIL},
-      {" SKIPPED", ST_SKIP}, {" XFAIL", ST_SKIP},
+      {" SKIPPED", ST_SKIP}, {" XFAIL", ST_SKIP}, {" XPASS", ST_PASS},
   };
   const char *p = NULL;
   status_t s = ST_FAIL;
@@ -744,8 +767,14 @@ static void raw_restore(void) {
     raw_active = 0;
   }
 }
+/* The running build/test, in its own process group so it can be killed whole.
+ * That also means a terminal Ctrl-C never reaches it, so the handler below has
+ * to take it down, or it outlives vtest. */
+static volatile pid_t g_child = 0;
 static void on_fatal_signal(int sig) {
   (void)sig;
+  if (g_child > 0)
+    kill(-g_child, SIGTERM);
   raw_restore();
   _exit(1);
 }
@@ -784,8 +813,6 @@ static void raw_enter(void) {
   const char *enter = "\x1b[?1049h\x1b[?25l\x1b[?7l";
   ssize_t w = write(STDOUT_FILENO, enter, strlen(enter));
   (void)w;
-  signal(SIGINT, on_fatal_signal);
-  signal(SIGTERM, on_fatal_signal);
   /* SIGWINCH without SA_RESTART so a resize interrupts the blocking read(). */
   struct sigaction sa;
   memset(&sa, 0, sizeof sa);
@@ -1432,6 +1459,7 @@ static int stream_exec(const char *cmd, int interactive,
     _exit(127);
   }
   close(pfd[1]);
+  g_child = pid;
 
   char rbuf[4096], line[8192];
   size_t ll = 0;
@@ -1508,6 +1536,7 @@ static int stream_exec(const char *cmd, int interactive,
   close(pfd[0]);
   int status = 0;
   waitpid(pid, &status, 0);
+  g_child = 0;
   if (interactive)
     raw_reassert(); /* the child may have reset the terminal under us */
   if (aborted)
@@ -1567,7 +1596,31 @@ static int run_suite(comp_t *c, const char *only, int interactive) {
     ctest_run_cmd(cmd, sizeof cmd, c, only);
   run_ctx_t x = {c, interactive, 0, NULL};
   int rc = stream_exec(cmd, interactive, on_run_line, &x);
-  return rc == -2 ? -2 : x.failed;
+  if (rc == -2)
+    return -2;
+
+  /* A case the runner never reported did not pass: it crashed the runner, or
+   * the runner never got to it. Left alone it reads as neither, and a batch
+   * run that counts only parsed failures would call it ALL PASSED. */
+  char msg[160];
+  for (int i = 0; i < c->ncases; i++) {
+    tcase_t *tc = &c->cases[i];
+    if (tc->status != ST_RUNNING)
+      continue;
+    tc->status = ST_FAIL;
+    snprintf(msg, sizeof msg, "no result reported (runner exited %d)", rc);
+    free(tc->detail);
+    tc->detail = strdup(msg);
+    x.failed++;
+  }
+  if (rc != 0 && x.failed == 0) {
+    snprintf(msg, sizeof msg,
+             "  runner exited %d with every case passed -- counted as failed",
+             rc);
+    on_build_line(&interactive, msg);
+    x.failed = 1;
+  }
+  return x.failed;
 }
 
 /* Build (lazily) then run, streaming both into the log pane. Selecting a test
@@ -1683,6 +1736,13 @@ static int run_report(int do_run) {
   return 0;
 }
 
+static const char kUsage[] =
+    "usage: vtest [--run | --list] [--conf PATH]\n"
+    "  (none)       interactive TUI\n"
+    "  --run        discover, run everything, report; exit 1 on any failure\n"
+    "  --list       discover and print the catalog without running\n"
+    "  --conf PATH  suite config (default: $VTEST_CONF, else ./vtest.conf)\n";
+
 int main(int argc, char **argv) {
   int do_run = 0, list_only = 0;
   const char *cfg = getenv("VTEST_CONF");
@@ -1693,6 +1753,13 @@ int main(int argc, char **argv) {
       list_only = 1;
     else if (strcmp(argv[i], "--conf") == 0 && i + 1 < argc)
       cfg = argv[++i];
+    else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+      fputs(kUsage, stdout);
+      return 0;
+    } else {
+      fprintf(stderr, "vtest: unknown argument '%s'\n%s", argv[i], kUsage);
+      return 2;
+    }
   }
   if (!cfg)
     cfg = "vtest.conf";
@@ -1710,7 +1777,10 @@ int main(int argc, char **argv) {
   if (access(".venv/bin/python", X_OK) == 0)
     snprintf(g_python, sizeof g_python, "%s/.venv/bin/python", g_cwd);
 
-  if (load_config(cfg) < 0) {
+  int nc = load_config(cfg);
+  if (nc == -2)
+    return 2;
+  if (nc < 0) {
     fprintf(stderr,
             "vtest: no %s here.\n"
             "  Run from the root of a repo that declares its suites, or pass\n"
@@ -1722,6 +1792,10 @@ int main(int argc, char **argv) {
     fprintf(stderr, "vtest: %s declares no suites.\n", cfg);
     return 2;
   }
+
+  /* Every mode, not just the TUI: --run in CI is killed the same way. */
+  signal(SIGINT, on_fatal_signal);
+  signal(SIGTERM, on_fatal_signal);
 
   discover_all();
 

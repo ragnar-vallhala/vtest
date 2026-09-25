@@ -6,19 +6,19 @@ carry Vayu-specific code.
 
 ## Phase 0 — parser tests
 
-- [ ] `tests/parse_test.c`: ctest result lines (Passed, Failed, `***Not Run`,
+- [x] `tests/parse_test.c`: ctest result lines (Passed, Failed, `***Not Run`,
       the two-space `Test  #1`), pytest `-v` lines, `load_config` (comments,
       empty keys, several suites). Registered in CMake, so `unit` and
       `unit-asan` both run it.
 
 ## Phase 1 — correctness
 
-- [ ] A crashed run must never be ALL PASSED. After a run, a case still pending
+- [x] A crashed run must never be ALL PASSED. After a run, a case still pending
       or running is a FAIL, and so is a non-zero exit with no failure parsed.
-- [ ] Ctrl-C orphans the build/test process group. Clear `ISIG` in raw mode so
-      it arrives as byte 3, which `stream_exec` already turns into a group kill.
-- [ ] pytest with no `filter` passes NULL to `%s` (`pytest '(null)'`).
-- [ ] Strict config and CLI: an unknown adapter, key or flag is an error.
+- [x] Ctrl-C orphans the build/test process group. The SIGINT/SIGTERM handler
+      kills the child's group, in every mode (`--run` in CI too).
+- [x] pytest with no `filter` passed NULL to `%s`; it now defaults to `.`.
+- [x] Strict config and CLI: an unknown adapter, key or flag is an error.
       Add `--help`. This is also what catches version skew between an
       installed vtest and a newer `vtest.conf`.
 

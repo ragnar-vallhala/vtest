@@ -11,6 +11,7 @@ build/vtest              # interactive TUI
 build/vtest --run        # discover + run everything + report
 build/vtest --list       # print the catalog without running
 build/vtest --conf PATH  # a config other than ./vtest.conf
+build/vtest --help
 ```
 
 The TUI has three panes — **tests**, **detail**, **log**. `←`/`→` move focus
@@ -46,8 +47,10 @@ configure = cmake -S sim/host -B build_san -DSAN=ON   # run before the build
 open    = 1              # start the group expanded in the TUI
 ```
 
-Unset keys are empty, which both adapters already read as "no filter" and "no
-prefix". Lines starting with `#` are comments.
+Unset keys are empty: "no filter" and "no prefix" (for pytest, no filter means
+the whole rootdir). Lines starting with `#` are comments. An unknown adapter or
+key is an error, not a default -- it is most likely a key from a newer vtest,
+and ignoring it would run the suite some other way than the conf asks.
 
 ## Adapters
 
@@ -77,7 +80,9 @@ configure = cmake -S sim/host -B build_san -DVAYU_SANITIZE=ON
 `configure` runs before the build, and again if discovery finds nothing — so a
 build dir that has never existed is created rather than reported as an empty
 suite. A suite that discovers no cases counts as a **failure** in `--run`: it
-means the suite did not run, which must never read as a pass.
+means the suite did not run, which must never read as a pass. The same goes for
+a case the runner never reported (it crashed, or never got there), and for a
+runner that exits non-zero while every parsed case passed.
 
 ## loc.sh
 
