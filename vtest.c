@@ -1571,7 +1571,16 @@ static int stream_exec(const char *cmd, int interactive,
         break; /* EOF */
       for (ssize_t i = 0; i < r; i++) {
         char ch = rbuf[i];
-        if (ch == '\n' || ll >= sizeof line - 1) {
+        /* A full buffer is flushed as a line of its own, and then `ch` is
+         * handled like any other -- not swallowed by the flush. A '\n' right
+         * at the limit is left to end the line itself, or it would add an
+         * empty one. */
+        if (ll >= sizeof line - 1 && ch != '\n') {
+          line[ll] = 0;
+          on_line(ctx, line);
+          ll = 0;
+        }
+        if (ch == '\n') {
           line[ll] = 0;
           on_line(ctx, line);
           ll = 0;

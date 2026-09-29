@@ -769,9 +769,11 @@ static int fatal_signal(void) {
 }
 
 static int nlines;
+static size_t nchars;
 static char lines[8][64];
 static void collect(void *v, const char *l) {
   (void)v;
+  nchars += strlen(l);
   if (nlines < 8)
     snprintf(lines[nlines], sizeof lines[0], "%.63s", l);
   nlines++;
@@ -791,8 +793,16 @@ static int streams(void) {
         "CR dropped, unterminated last line kept");
 
   nlines = 0;
+  nchars = 0;
   stream_exec("head -c 9000 /dev/zero | tr '\\0' x", 0, collect, NULL);
   CHECK(nlines == 2, "an overlong line is split, not overflowed");
+  CHECK(nchars == 9000, "and no character is lost at the split");
+  nlines = 0;
+  nchars = 0;
+  stream_exec("head -c 8191 /dev/zero | tr '\\0' x; echo; echo y", 0, collect,
+              NULL);
+  CHECK(nlines == 2 && nchars == 8192,
+        "a line that exactly fills the buffer is not followed by an empty one");
 
   CHECK(stream_exec("kill -9 $$", 0, collect, NULL) == -1,
         "killed by a signal is -1");
