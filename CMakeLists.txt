@@ -11,18 +11,19 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
 endif()
 
-# The exact commit, not a hand-bumped number: an installed vtest is shared by
-# every repo on the machine, and `vtest --version` is how you tell which one.
-execute_process(COMMAND git describe --tags --always --dirty
-                WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-                OUTPUT_VARIABLE VTEST_VERSION OUTPUT_STRIP_TRAILING_WHITESPACE
-                ERROR_QUIET)
-
 add_executable(vtest vtest.c)
 target_compile_options(vtest PRIVATE -std=c11 -Wall -Wextra)
-if(VTEST_VERSION)
-  target_compile_definitions(vtest PRIVATE VTEST_VERSION="${VTEST_VERSION}")
-endif()
+
+# The exact commit, not a hand-bumped number: an installed vtest is shared by
+# every repo on the machine, and `vtest --version` is how you tell which one.
+# Read at build time, not configure time, so it follows every commit.
+set(VTEST_VERSION_H ${CMAKE_CURRENT_BINARY_DIR}/vtest_version.h)
+add_custom_target(vtest_version
+  COMMAND ${CMAKE_COMMAND} -DSRC=${CMAKE_CURRENT_SOURCE_DIR}
+          -DOUT=${VTEST_VERSION_H} -P ${CMAKE_CURRENT_SOURCE_DIR}/version.cmake
+  BYPRODUCTS ${VTEST_VERSION_H})
+add_dependencies(vtest vtest_version)
+target_compile_options(vtest PRIVATE -include ${VTEST_VERSION_H})
 
 install(TARGETS vtest)
 install(PROGRAMS loc.sh DESTINATION bin RENAME vtest-loc)
