@@ -385,6 +385,10 @@ static void ctest_discover(comp_t *c) {
     snprintf(c->note, sizeof c->note, "ctest not found on PATH");
     return;
   }
+  /* Read before strtok_r below cuts `out` into lines -- after it, strstr
+   * sees only the first one. */
+  int unbuilt = strstr(out, "Failed to change working directory") ||
+                strstr(out, "Cannot find") || strstr(out, "No such file");
   int cap = 8, n = 0;
   tcase_t *arr = malloc((size_t)cap * sizeof *arr);
   char *save = NULL;
@@ -403,8 +407,7 @@ static void ctest_discover(comp_t *c) {
     }
   }
   if (n == 0) {
-    if (strstr(out, "Failed to change working directory") ||
-        strstr(out, "Cannot find") || strstr(out, "No such file"))
+    if (unbuilt)
       snprintf(c->note, sizeof c->note, "not built — build the %s target",
                c->name);
     else
@@ -484,13 +487,15 @@ static void pytest_discover(comp_t *c) {
     snprintf(c->note, sizeof c->note, "python not found");
     return;
   }
+  int no_pytest =
+      strstr(out, "No module named pytest") || strstr(out, "not found");
   int cap = 16, n = 0;
   tcase_t *arr = malloc((size_t)cap * sizeof *arr);
   char *save = NULL;
   for (char *l = strtok_r(out, "\n", &save); l;
        l = strtok_r(NULL, "\n", &save)) {
     /* a collected nodeid line: "tests/...::test_x", not indented, has "::" */
-    if (strstr(l, "::") && l[0] && l[0] != ' ' && l[0] != '=') {
+    if (strstr(l, "::") && l[0] != ' ' && l[0] != '=') {
       if (n == cap) {
         cap *= 2;
         arr = xrealloc(arr, (size_t)cap * sizeof *arr);
@@ -502,7 +507,7 @@ static void pytest_discover(comp_t *c) {
     }
   }
   if (n == 0) {
-    if (strstr(out, "No module named pytest") || strstr(out, "not found"))
+    if (no_pytest)
       snprintf(c->note, sizeof c->note,
                "pytest unavailable — install it, or activate the venv");
     else
@@ -1063,6 +1068,12 @@ static void discover_all(void) {
 static int read_key(void) {
   unsigned char c;
   ssize_t r;
+  /* A resize that landed while we were drawing interrupted no read; without
+   * this it waits for the next key.
+   * ponytail: a SIGWINCH between this check and read() still waits; pselect
+   * with SIGWINCH blocked outside it closes that window if it ever matters. */
+  if (g_resized)
+    return KEY_RESIZE;
   /* read() returning 0 on a terminal means someone put it back in canonical
    * mode (a child that touched termios), not that the user asked to quit --
    * which is what made the TUI exit by itself when a run finished. Restore our
@@ -1451,8 +1462,15 @@ static void repaint(void) {
     g_top = 0;
   g_frame.len = 0;
   draw_frame(&g_frame, rows, n, g_sel, g_top);
-  ssize_t w = write(STDOUT_FILENO, g_frame.buf, g_frame.len);
-  (void)w;
+  /* A SIGWINCH mid-write returns short: finish the frame, or the rest of it
+   * is lost and the screen stays half-drawn until the next key. */
+  for (size_t off = 0; off < g_frame.len;) {
+    ssize_t w = write(STDOUT_FILENO, g_frame.buf + off, g_frame.len - off);
+    if (w > 0)
+      off += (size_t)w;
+    else if (w == 0 || errno != EINTR)
+      break;
+  }
 }
 
 /* Spawn `cmd` via /bin/sh in its own process group, stream its output line by
@@ -1503,20 +1521,19 @@ static int stream_exec(const char *cmd, int interactive,
     FD_ZERO(&rs);
     FD_SET(pfd[0], &rs);
     int maxfd = pfd[0];
-    if (interactive) {
-      FD_SET(STDIN_FILENO, &rs);
-      if (STDIN_FILENO > maxfd)
-        maxfd = STDIN_FILENO;
-    }
+    if (interactive)
+      FD_SET(STDIN_FILENO, &rs); /* fd 0: never above pfd[0] */
     /* A suite can be silent for seconds (a cmake build, a Renode boot). Wake
      * anyway so the spinner turns and a keystroke is never left waiting. */
     struct timeval tv = {0, 200000};
     int sr = select(maxfd + 1, &rs, NULL, NULL, interactive ? &tv : NULL);
-    if (sr == 0) {
-      if (interactive) {
-        g_spin++;
-        repaint();
+    if (sr == 0) { /* only interactive runs have a timeout */
+      if (g_resized) { /* landed outside select, so it interrupted nothing */
+        query_winsize();
+        g_resized = 0;
       }
+      g_spin++;
+      repaint();
       continue;
     }
     if (sr < 0) {
@@ -1538,6 +1555,7 @@ static int stream_exec(const char *cmd, int interactive,
         log_add("  ⨯ aborted");
       } else if (key == KEY_RESIZE) {
         query_winsize();
+        g_resized = 0;
         repaint();
       } else {
         /* Navigation only: 'r'/'a'/space would start a run inside a run. */
@@ -1693,6 +1711,11 @@ static void do_run_interactive(comp_t *c, const char *only) {
 
   int p, ran;
   status_t cs = comp_status(c, &p, &ran);
+  /* One case run: its verdict, not the suite's -- which stays pending while
+   * the other cases have not run. */
+  tcase_t *one = only ? find_case(c, only) : NULL;
+  if (one)
+    cs = one->status;
   log_addf("→ %s: %s (%d/%d passed)", only ? only : c->name, status_label(cs),
            p, ran);
   g_status = NULL;
@@ -1758,7 +1781,7 @@ static int run_report(int do_run) {
   int failed = 0;
   if (do_run)
     failed = run_all_batch();
-  row_t rows[256];
+  row_t rows[256] = {{0}}; /* never read past n; zeroed for gcc's benefit */
   int n = build_rows(rows, 256, 0);
   printf("\n");
   render(rows, n, -1, 0, 0);
@@ -1811,8 +1834,8 @@ int main(int argc, char **argv) {
   const char *base = strrchr(g_cwd, '/');
   base = (base && base[1]) ? base + 1 : g_cwd;
   size_t bl = strlen(base);
-  if (bl >= sizeof g_repo)
-    bl = sizeof g_repo - 1;
+  if (bl >= sizeof g_repo) /* GCOVR_EXCL_BR_LINE: NAME_MAX is 255 */
+    bl = sizeof g_repo - 1;  /* GCOVR_EXCL_LINE */
   memcpy(g_repo, base, bl);
   g_repo[bl] = 0;
   if (access(".venv/bin/python", X_OK) == 0)
