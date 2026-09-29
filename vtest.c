@@ -1182,10 +1182,13 @@ static void detail_scroll(int delta, int visible) {
     g_detail_off = 0;
 }
 
+/* Requested detail/log heights, changed with +/-; the list takes the rest. */
+static int g_detail_h = 3, g_log_h = 6;
+
 /* Pane heights: detail and log shrink first on short terminals so the list
  * keeps at least one row and the footer stays pinned to g_rows. */
 static void layout(int *list_h, int *detail_n, int *log_n) {
-  int dn = 3, ln = 6;
+  int dn = g_detail_h, ln = g_log_h;
   int lh = g_rows - 2 /*header*/ - 2 /*footer*/ - (1 + dn) - (1 + ln);
   while (lh < 3 && ln > 1) {
     ln--;
@@ -1322,6 +1325,7 @@ static void draw_frame(sb_t *s, const row_t *rows, int nrows, int sel,
 
   /* log pane: labeled rule + last log_n lines of build/run output */
   int lr = dr + 1 + detail_n;
+  log_scroll(0, log_n); /* pane may have been resized; re-clamp */
   {
     char lbl[64];
     if (g_log_off > 0)
@@ -1341,13 +1345,13 @@ static void draw_frame(sb_t *s, const row_t *rows, int nrows, int sel,
   emit_rule(s, g_rows - 1);
   at_clear(s, g_rows);
   sb_putf(s,
-          " %s←/→%s pane [%s]  %s↑/↓%s scroll  %sspace%s expand  %sr%s run  "
-          "%sa%s all  %sf%s failed%s  %sq%s quit",
+          " %s←/→%s pane [%s]  %s↑/↓%s scroll  %s+/-%s size  %sspace%s expand  "
+          "%sr%s run  %sa%s all  %sf%s failed%s  %sq%s quit",
           CBOLD, CRESET,
           g_pane == PANE_LIST ? "tests"
                               : (g_pane == PANE_DETAIL ? "detail" : "log"),
           CBOLD, CRESET, CBOLD, CRESET, CBOLD, CRESET, CBOLD, CRESET, CBOLD,
-          CRESET, g_filter ? " [on]" : "", CBOLD, CRESET);
+          CRESET, CBOLD, CRESET, g_filter ? " [on]" : "", CBOLD, CRESET);
   if (g_status)
     sb_putf(s, "   %s%s%s", CYEL, g_status, CRESET);
   /* park the cursor out of the way (bottom-right) */
@@ -1376,6 +1380,25 @@ static int nav_key(int key, const row_t *rows, int n) {
     } else {
       log_scroll(up ? ln - 1 : -(ln - 1), ln);
     }
+    return 1;
+  }
+  if (key == '+' || key == '=' || key == '-') {
+    /* Grow/shrink the focused pane. The list is the remainder, so growing it
+     * means shrinking the log (then detail). Take effective heights first so
+     * a short terminal's squeeze doesn't leave dead keypresses. */
+    int grow = (key != '-');
+    g_detail_h = dn;
+    g_log_h = ln;
+    int *h = g_pane == PANE_DETAIL ? &g_detail_h : &g_log_h;
+    if (g_pane == PANE_LIST) {
+      grow = !grow;
+      if (!grow && ln == 1)
+        h = &g_detail_h;
+    }
+    if (grow && lh > 3)
+      (*h)++;
+    else if (!grow && *h > 1)
+      (*h)--;
     return 1;
   }
   if (key == 'l' || key == 'h') {

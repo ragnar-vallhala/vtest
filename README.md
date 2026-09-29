@@ -26,8 +26,8 @@ build/vtest --help
 
 The TUI has three panes — **tests**, **detail**, **log**. `←`/`→` move focus
 between them and `↑`/`↓` scroll whichever holds focus, so one pair of keys
-drives all three; `PgUp`/`PgDn` page the focused pane. The focused pane's rule
-brightens, and the footer names it.
+drives all three; `PgUp`/`PgDn` page the focused pane and `+`/`-` grow or
+shrink it. The focused pane's rule brightens, and the footer names it.
 
 `space` expands a suite, `r` runs the selection, `a` runs everything, `f` shows
 only failures, `q` quits.
