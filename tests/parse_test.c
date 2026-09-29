@@ -190,8 +190,31 @@ static int unreported(void) {
   return 0;
 }
 
+/* The check adapter end to end: the shell wrapper's exit-status mapping. 77 is
+ * SKIP, so a gate that could not run where it was asked to -- NavHAL's HIL
+ * suites report it for a board nobody plugged in -- does not read as a failure
+ * and does not colour the batch report red. */
+static int check_status(void) {
+  struct {
+    const char *cmd;
+    status_t want;
+    int failed;
+  } t[] = {{"true", ST_PASS, 0}, {"exit 77", ST_SKIP, 0}, {"exit 1", ST_FAIL, 1}};
+
+  for (unsigned i = 0; i < sizeof t / sizeof t[0]; i++) {
+    tcase_t cases[1] = {{.name = "gate", .status = ST_RUNNING}};
+    comp_t c = {.adapter = AD_CHECK, .name = "gate", .test_dir = ".",
+                .cmd = t[i].cmd, .cases = cases, .ncases = 1};
+    int failed = run_suite(&c, NULL, 0);
+    CHECK(cases[0].status == t[i].want, t[i].cmd);
+    CHECK(failed == t[i].failed, "check: failure count");
+  }
+  return 0;
+}
+
 int main(void) {
-  if (ctest_lines() || pytest_lines() || config() || builds() || unreported())
+  if (ctest_lines() || pytest_lines() || config() || builds() || unreported() ||
+      check_status())
     return 1;
   printf("  %d checks, 0 failures\n", checks);
   return 0;

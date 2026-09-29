@@ -77,7 +77,7 @@ carry Vayu-specific code.
 ntest (`NavHAL/tools/ntest`, 1014 lines of Python) is retired; vtest is the
 front end and the shell backends that predate ntest do the work.
 
-- [ ] vtest: a `check` exiting 77 is SKIP, not FAIL (the automake/ctest
+- [x] vtest: a `check` exiting 77 is SKIP, not FAIL (the automake/ctest
       convention) -- a HIL board that is not plugged in is not a failure.
 - [ ] `tools/hil/run.sh`: exit 77 when the board is absent (today 3); port
       ntest's SWD console capture (openocd + gdb, `CONSOLE=swd`, used by

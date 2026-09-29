@@ -75,6 +75,9 @@ and ignoring it would run the suite some other way than the conf asks.
   formatter, a coverage ratchet, a line count. `cmd` is the command; its exit
   status is the result and its output goes to the log. Modelled as a suite with
   one case, so the tree, the run loop and the batch report handle it unchanged.
+  Exit 0 passes and **77 skips** — the automake/ctest convention, for a gate that
+  could not run where it was asked to (a HIL board nobody plugged in, a tool that
+  is not installed). Anything else fails.
 
 Result lines are parsed as text. No XML, no JSON, no reporting plugins.
 

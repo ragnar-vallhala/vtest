@@ -581,10 +581,19 @@ static void check_discover(comp_t *c) {
 
 static void check_run_cmd(char *buf, size_t n, comp_t *c, const char *only) {
   (void)only; /* one case: running "just that case" is running the check */
+  /* 77 is SKIP, the status ctest and autotools already use for it. A gate that
+   * cannot run where it was asked to -- a HIL board nobody plugged in, a linter
+   * that is not installed -- has not failed, and reporting it red is how a
+   * report stops being read. Every other non-zero status is a failure.
+   *
+   * The command runs in a subshell so that a `cmd` which exits the shell itself
+   * cannot take the wrapper down with it before it reports a verdict. */
   snprintf(buf, n,
-           "cd '%s' && if %s 2>&1; then echo '%s PASSED'; "
+           "cd '%s' && ( %s ) 2>&1; s=$?; "
+           "if [ $s -eq 0 ]; then echo '%s PASSED'; "
+           "elif [ $s -eq 77 ]; then echo '%s SKIPPED'; "
            "else echo '%s FAILED'; fi",
-           c->test_dir, c->cmd ? c->cmd : "false", c->name, c->name);
+           c->test_dir, c->cmd ? c->cmd : "false", c->name, c->name, c->name);
 }
 
 /* ----------------------------------------------------------- adapter dispatch */
