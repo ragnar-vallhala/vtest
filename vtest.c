@@ -1369,14 +1369,18 @@ static void draw_frame(sb_t *s, const row_t *rows, int nrows, int sel,
   sb_putf(s, "\x1b[%d;%dH", g_rows, g_cols);
 }
 
-/* Pane/selection keys: focus (h/l, left/right), scroll (j/k, up/down) and
- * paging. Shared by the idle loop and the streaming run loop, so navigation
- * works while a suite runs instead of the keystroke being dropped. Returns 1
- * if the key was a navigation key. */
+/* View keys: focus (h/l, left/right), scroll (j/k, up/down), paging, pane
+ * size (+/-) and expand (space). Shared by the idle loop and the streaming run
+ * loop, so the view works while a suite runs instead of the keystroke being
+ * dropped. Nothing here starts a run. Returns 1 if the key was handled. */
 static int nav_key(int key, const row_t *rows, int n) {
   int lh, dn, ln;
   layout(&lh, &dn, &ln);
-  (void)rows;
+  if (key == ' ') {
+    if (g_sel < n)
+      comps[rows[g_sel].c].expanded = !comps[rows[g_sel].c].expanded;
+    return 1;
+  }
   if (key == KEY_PGUP || key == KEY_PGDN) {
     int up = (key == KEY_PGUP);
     if (g_pane == PANE_LIST) {
@@ -1558,7 +1562,7 @@ static int stream_exec(const char *cmd, int interactive,
         g_resized = 0;
         repaint();
       } else {
-        /* Navigation only: 'r'/'a'/space would start a run inside a run. */
+        /* View keys only: 'r'/'a' would start a run inside a run. */
         row_t krows[256];
         int kn = build_rows(krows, 256, g_filter);
         if (nav_key(key, krows, kn))
@@ -1762,9 +1766,7 @@ static int run_interactive(void) {
       break;
     if (nav_key(key, rows, n)) {
       /* handled */
-    } else if (key == ' ' && n)
-      comps[rows[g_sel].c].expanded = !comps[rows[g_sel].c].expanded;
-    else if (key == 'r' && n) {
+    } else if (key == 'r' && n) {
       int ci = rows[g_sel].c, k = rows[g_sel].cidx;
       if (k == -1)
         do_run_interactive(&comps[ci], NULL);

@@ -342,6 +342,11 @@ static int nav(void) {
   int n = build_rows(rw, 16, 0);
 
   CHECK(nav_key('x', rw, n) == 0, "not a navigation key");
+  CHECK(nav_key('r', rw, n) == 0, "r is not a view key: it would start a run");
+  CHECK(nav_key(' ', rw, n) && model[0].expanded == 0, "space collapses");
+  CHECK(nav_key(' ', rw, n) && model[0].expanded == 1, "and expands");
+  CHECK(nav_key(' ', rw, 0) && model[0].expanded == 1,
+        "space on an empty tree is a no-op");
   CHECK(nav_key('k', rw, n) && g_sel == 0, "up clamps at the first row");
   g_detail_off = 2;
   CHECK(nav_key('j', rw, n) && g_sel == 1 && g_detail_off == 0,
@@ -830,10 +835,12 @@ static int streams(void) {
    * through the inherited pipe, so they land mid-run, deterministically. */
   char cmd[256];
   int w = keys_in("", 0);
-  snprintf(cmd, sizeof cmd, "printf 'jx\\033[B' >&%d; sleep 0.3; echo done", w);
+  snprintf(cmd, sizeof cmd, "printf 'jx\\033[B r' >&%d; sleep 0.3; echo done",
+           w);
   nlines = 0;
-  CHECK(stream_exec(cmd, 1, collect, NULL) == 0, "navigation does not abort");
+  CHECK(stream_exec(cmd, 1, collect, NULL) == 0, "view keys do not abort");
   CHECK(g_sel == 2, "the keys moved the selection mid-run");
+  CHECK(model[0].expanded == 0, "space collapsed a suite mid-run");
 
   g_resized = 1;
   CHECK(stream_exec("sleep 0.3", 1, collect, NULL) == 0 && !g_resized,

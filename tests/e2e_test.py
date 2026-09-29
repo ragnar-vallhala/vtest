@@ -236,6 +236,10 @@ def tui(repo):
     t.expect(r"ready — ")
     t.send("r")
     t.expect(r"started")
+    t.send(" ")               # expand while it runs
+    t.expect(r"▾ slow")
+    t.send(" ")
+    t.expect(r"▸ slow")
     t.send("q")
     t.expect(r"aborted")
     t.send("r")
