@@ -146,6 +146,7 @@ static int config(void) {
   CHECK(load_text("adapter = ctest\n") == -2, "config: key before a suite");
   CHECK(load_text("[a\n") == -2, "config: unterminated suite name");
   CHECK(load_text("[a]\njunk\n") == -2, "config: line without =");
+  CHECK(load_text("[a]\n= x\n") == -2, "config: empty key");
 
   CHECK(load_text("[py]\nadapter = pytest\nbuild = make sim\n") == 1 &&
             !strcmp(comps[0].build, "make sim"),

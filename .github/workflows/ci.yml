@@ -1,0 +1,65 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: test (${{ matrix.cc }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        cc: [gcc, clang]
+    env:
+      CC: ${{ matrix.cc }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # git describe needs the tags for --version
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pytest
+      - name: build + test
+        run: |
+          cmake -S . -B build
+          cmake --build build
+          ctest --test-dir build --output-on-failure
+      - name: ASan + UBSan
+        run: |
+          cmake -S . -B build_san -DVTEST_SANITIZE=ON
+          cmake --build build_san
+          ctest --test-dir build_san --output-on-failure
+      - name: vtest runs its own suites
+        run: build/vtest --run
+
+  coverage:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pytest gcovr
+      - name: build + test, instrumented
+        run: |
+          cmake -S . -B build_cov -DVTEST_COVERAGE=ON
+          cmake --build build_cov
+          ctest --test-dir build_cov --output-on-failure
+      - name: line + branch gates
+        run: cmake --build build_cov --target coverage
+      - name: summary
+        if: always()
+        run: |
+          { echo '### Coverage'; echo '```'; cat build_cov/coverage/summary.txt; echo '```'; } \
+            >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-html
+          path: build_cov/coverage/

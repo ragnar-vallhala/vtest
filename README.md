@@ -132,3 +132,23 @@ build/vtest --run          # or run vtest against itself
 vtest is one file of statics, so a test reaches the unit under test by
 including it with `main()` renamed away — no header extraction for logic that
 is not a library, and no test scaffolding in the production file.
+
+- `tests/parse_test.c`, `tests/pane_scroll_test.c` — the parsers and the
+  scroll arithmetic.
+- `tests/tui_test.c` — the TUI, key reader, streaming runner and run paths,
+  in-process. The libc calls vtest can see fail (malloc, popen, fork, select,
+  read, …) go through wrappers a test arms, so the failure branches run too.
+- `tests/e2e_test.py` — the real binary against `tests/fixture` (a repo with
+  a ctest, pytest and check suite, and each way a suite breaks), the TUI
+  driven through a pty. Needs pytest.
+
+Coverage, line and branch, with the floor CI holds in `gcovr.cfg`:
+
+```sh
+cmake -S . -B build_cov -DVTEST_COVERAGE=ON && cmake --build build_cov
+ctest --test-dir build_cov && cmake --build build_cov --target coverage
+# report: build_cov/coverage/index.html
+```
+
+CI (`.github/workflows/ci.yml`) builds and tests with gcc and clang, under
+ASan + UBSan, runs vtest against itself, and enforces the coverage floor.
